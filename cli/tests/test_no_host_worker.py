@@ -1,0 +1,29 @@
+from pathlib import Path
+
+from cli.flows import _coordinator_unit, _node_unit
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_units_do_not_start_a_worker():
+    text = _coordinator_unit("/opt/audiobook/coordinator") + _node_unit("/opt/audiobook/supervisor")
+    assert "worker.prep" not in text
+    assert "worker.tts" not in text
+    assert "python -m worker" not in text
+
+
+def test_supervisor_service_and_image_stay_off_the_host_venv():
+    service = (ROOT / "deploy/audiobook-supervisor.service").read_text()
+    image = (ROOT / "deploy/supervisor.Dockerfile").read_text()
+    assert "/var/run/docker.sock" in service
+    assert "venv" not in service
+    assert "--gpus" not in service
+    assert 'CMD ["python", "-m", "supervisor.supervisor"]' in image
+
+
+def test_prep_and_tts_have_no_dockerfile_yet():
+    for folder in ("worker/prep", "worker/tts"):
+        path = ROOT / folder
+        assert list(path.glob("Dockerfile")) == []
+        readme = (path / "README.md").read_text()
+        assert "Not yet implemented" in readme

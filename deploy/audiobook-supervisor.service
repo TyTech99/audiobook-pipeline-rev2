@@ -6,7 +6,10 @@ Wants=network-online.target
 [Service]
 User=audiobook
 EnvironmentFile=/etc/audiobook/node.env
-ExecStart=/opt/audiobook/supervisor/venv/bin/python -m supervisor.supervisor
+ExecStartPre=/bin/sh /opt/audiobook/supervisor/record-hardware.sh
+ExecStartPre=docker build -t audiobook-supervisor:local -f /opt/audiobook/supervisor/supervisor.Dockerfile /opt/audiobook/supervisor
+ExecStartPre=docker rm -f audiobook-supervisor
+ExecStart=docker run --name audiobook-supervisor --rm -v /var/run/docker.sock:/var/run/docker.sock --env-file /etc/audiobook/node.env -e HARDWARE_FILE=/etc/audiobook/hardware.json -v /etc/audiobook/hardware.json:/etc/audiobook/hardware.json:ro audiobook-supervisor:local
 Restart=always
 RestartSec=3
 

@@ -85,7 +85,7 @@ Node (VPS/GPU machine)
 
 ### Positive
 
-- Zero resource usage when idle (just the tiny supervisor)
+- Zero resource usage when idle, other than the supervisor container
 - Full GPU availability for other work when not processing
 - Easy to add/remove nodes
 - Clean isolation between jobs
@@ -98,9 +98,10 @@ Node (VPS/GPU machine)
 
 ## Implementation Notes
 
-- Supervisor is a small Python script (~200 lines)
+- The supervisor process is the `audiobook-supervisor` container, with the Docker socket mounted. It does not mount NVIDIA devices.
+- GPU devices stay on the worker containers. The supervisor requests them with `--gpus all` through the socket.
+- The host starter writes hardware JSON. The supervisor reads `HARDWARE_FILE` and does not probe `pynvml` inside the container.
 - Uses Docker SDK for container management
 - Worker images are pre-built and versioned
 - Models are mounted from host (not baked into images) for fast updates
-- GPU passthrough via `--gpus all` flag
 - Container logs are captured and uploaded to S3 for debugging

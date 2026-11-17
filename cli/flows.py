@@ -13,11 +13,11 @@ EXIT_FAILED = 3
 EXIT_REBOOT = 4
 
 
+SUPERVISOR_IMAGE = "audiobook-supervisor:local"
+
+
 def coordinator_packages(state: dict) -> list[str]:
-    names = ["python3", "python3-venv", "python3-pip", "postgresql", "redis-server"]
-    if state.get("tls", {}).get("mode") == "acme":
-        names.append("certbot")
-    return names
+    return ["docker-ce"]
 
 
 def node_packages(state: dict, host, windows: bool) -> tuple[int, list[str]]:
@@ -25,11 +25,11 @@ def node_packages(state: dict, host, windows: bool) -> tuple[int, list[str]]:
     if "convert" in queues and not host.nvidia_smi():
         return EXIT_PRECONDITION, []
     if windows:
-        names = ["Python.Python.3.11"]
+        names = []
         if not host.docker_ready:
             names.append("Docker.DockerDesktop")
         return EXIT_OK, names
-    names = ["python3", "python3-venv", "python3-pip", "docker-ce"]
+    names = ["docker-ce"]
     if "convert" in queues and host.nvidia_smi():
         names.append("nvidia-container-toolkit")
     return EXIT_OK, names
@@ -116,6 +116,7 @@ def install_coordinator(host, state: dict, messages: list[str]) -> dict:
     host.install_packages(coordinator_packages(state))
     host.write(paths["coordinator_env"], text)
     host.write(paths["coordinator_prefix"] + "/REVISION", "installed")
+    _install_coordinator_files(host, paths["coordinator_prefix"])
     host.install_unit(paths["coordinator_unit"], unit)
     messages.append("coordinator installed")
     return {"code": EXIT_OK, "changed": True}
@@ -168,8 +169,10 @@ def install_node(host, state: dict, api, messages: list[str]) -> dict:
     if windows:
         if host.reboot_pending:
             return {"code": EXIT_REBOOT, "changed": False}
-        host.install_task(paths["node_task"], paths["node_prefix"] + r"\python.exe -m supervisor")
+        host.write(r"C:\ProgramData\audiobook\hardware.json", '{"cpu":1,"ram_gb":1.0,"gpu":null}\n')
+        host.install_task(paths["node_task"], _node_task())
     else:
+        _install_supervisor_files(host, paths["node_prefix"])
         host.install_unit(paths["node_unit"], _node_unit(paths["node_prefix"]))
     messages.append("node installed")
     return {"code": EXIT_OK, "changed": True}
@@ -303,17 +306,91 @@ def invite_node(api, coordinator_url: str, operator_key: str, node_id: str, queu
     }
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _copy_tree(host, source: Path, dest_root: str) -> None:
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        if "__pycache__" in path.parts or "tests" in path.parts or path.suffix == ".pyc":
+            continue
+        host.write(dest_root + "/" + path.relative_to(source).as_posix(), path.read_text())
+
+
+def _install_coordinator_files(host, prefix: str) -> None:
+    root = _repo_root()
+    compose = (root / "deploy" / "docker-compose.dev.yml").read_text()
+    compose = compose.replace("context: ..", "context: .").replace(
+        "dockerfile: deploy/coordinator.Dockerfile",
+        "dockerfile: coordinator.Dockerfile",
+    )
+    host.write(prefix + "/docker-compose.dev.yml", compose)
+    host.write(prefix + "/coordinator.Dockerfile", (root / "deploy" / "coordinator.Dockerfile").read_text())
+    _copy_tree(host, root / "coordinator", prefix + "/coordinator")
+    host.write(prefix + "/config/coordinator.yaml", (root / "config" / "coordinator.yaml").read_text())
+
+
+def _install_supervisor_files(host, prefix: str) -> None:
+    root = _repo_root()
+    host.write(prefix + "/supervisor.Dockerfile", (root / "deploy" / "supervisor.Dockerfile").read_text())
+    host.write(prefix + "/record-hardware.sh", RECORD_HARDWARE)
+    _copy_tree(host, root / "supervisor", prefix + "/supervisor")
+    host.write(prefix + "/config/supervisor.yaml", (root / "config" / "supervisor.yaml").read_text())
+
+
 def _coordinator_unit(prefix: str) -> str:
     return (
         "[Service]\n"
-        f"ExecStart={prefix}/venv/bin/python -m coordinator.main\n"
+        "Type=oneshot\n"
+        "RemainAfterExit=yes\n"
+        f"ExecStart=docker compose -f {prefix}/docker-compose.dev.yml up -d\n"
+        f"ExecStop=docker compose -f {prefix}/docker-compose.dev.yml down\n"
         "EnvironmentFile=/etc/audiobook/coordinator.env\n"
+    )
+
+
+def _node_task() -> str:
+    return (
+        "docker run --name audiobook-supervisor --rm "
+        "-v //./pipe/docker_engine://./pipe/docker_engine "
+        "--env-file C:\\ProgramData\\audiobook\\node.env "
+        "-e HARDWARE_FILE=C:\\ProgramData\\audiobook\\hardware.json "
+        f"{SUPERVISOR_IMAGE}"
     )
 
 
 def _node_unit(prefix: str) -> str:
     return (
         "[Service]\n"
-        f"ExecStart={prefix}/venv/bin/python -m supervisor.supervisor\n"
+        f"ExecStartPre=/bin/sh {prefix}/record-hardware.sh\n"
+        f"ExecStartPre=docker build -t {SUPERVISOR_IMAGE} -f {prefix}/supervisor.Dockerfile {prefix}\n"
+        "ExecStartPre=docker rm -f audiobook-supervisor\n"
+        "ExecStart=docker run --name audiobook-supervisor --rm "
+        "-v /var/run/docker.sock:/var/run/docker.sock "
+        "--env-file /etc/audiobook/node.env "
+        "-e HARDWARE_FILE=/etc/audiobook/hardware.json "
+        "-v /etc/audiobook/hardware.json:/etc/audiobook/hardware.json:ro "
+        f"{SUPERVISOR_IMAGE}\n"
         "EnvironmentFile=/etc/audiobook/node.env\n"
     )
+
+
+RECORD_HARDWARE = """#!/bin/sh
+out=/etc/audiobook/hardware.json
+cpu=$(nproc 2>/dev/null || echo 1)
+ram=$(awk '/MemTotal/ {printf "%.1f", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo 1.0)
+gpu=null
+if command -v nvidia-smi >/dev/null 2>&1; then
+  info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits 2>/dev/null | head -n 1)
+  if [ -n "$info" ]; then
+    name=$(printf '%s' "$info" | cut -d, -f1 | sed 's/^ *//;s/ *$//;s/"//g')
+    vram=$(printf '%s' "$info" | cut -d, -f2 | sed 's/^ *//;s/ *$//')
+    gb=$(awk -v m="$vram" 'BEGIN {printf "%.1f", m/1024}')
+    gpu=$(printf '{"model":"%s","vram_gb":%s}' "$name" "$gb")
+  fi
+fi
+mkdir -p /etc/audiobook
+printf '{"cpu":%s,"ram_gb":%s,"gpu":%s}\\n' "$cpu" "$ram" "$gpu" > "$out"
+"""

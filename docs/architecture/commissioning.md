@@ -4,14 +4,14 @@ How a coordinator host and a worker node are installed, checked, and removed.
 
 This follows [ADR-003](../decisions/003-jit-workers.md) and [ADR-005](../decisions/005-node-commissioning.md). The supervisor is the process that stays up. Worker containers come and go. Commissioning enrolls the machine, not a container.
 
-Nothing in this document is implemented yet. The coordinator, supervisor, and workers are still design-only.
+`audiobookctl` in `cli/` installs the coordinator and the supervisor. Prep and TTS workers are not implemented yet.
 
 ## Two hosts
 
 | Host | What runs on it | What "installed" means |
 | --- | --- | --- |
-| Coordinator | Redis, PostgreSQL, the coordinator process, S3 credentials | An operator can authenticate and the queues exist. |
-| Worker node | Docker, the supervisor, a model directory on TTS nodes | The node record is `commissioned`, and a probe container starts and exits. |
+| Coordinator | Docker Engine, then the compose services Redis, PostgreSQL, and the coordinator | An operator can authenticate and the queues exist. |
+| Worker node | Docker Engine, the supervisor container, the NVIDIA driver and toolkit on GPU nodes, a model directory on TTS nodes | The node record is `commissioned`, and a probe container starts and exits. |
 
 A single machine can be both for local development. The steps are the same. The dev stand binds coordinator ports to localhost and uses HTTP. Any other layout uses HTTPS.
 
@@ -100,13 +100,11 @@ Supervisor heartbeat response:
 
 ### Install
 
-1. Install Python 3.11, Redis 7 with AOF on, and PostgreSQL 15 or newer. Docker is optional on this host. Workers do not run here unless the machine is also a node.
-2. Create database `audiobook` and a user that owns it. The coordinator creates tables on startup, including `nodes`.
-3. Create bucket `audiobook-pipeline` on the configured S3 endpoint. MinIO is fine for the dev stand.
-4. Write `/etc/audiobook/coordinator.env` mode `0600` with `REDIS_PASSWORD`, `POSTGRES_PASSWORD`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_ENDPOINT`, and `API_KEY_OPERATOR`.
-5. Copy `config/coordinator.yaml`. Point `auth.operator_api_keys` at the operator key env var only. Node keys are not listed in this file. They are rows in `nodes`. Set `coordinator_id` and keep it stable across restarts.
-6. Open the coordinator port to operators. Leave Redis bound to a private interface.
-7. Start Redis, PostgreSQL, then the coordinator.
+1. Install Docker Engine. `audiobookctl` installs `docker-ce`. Do not install database packages or a certificate client on the host.
+2. Run coordinator install. It writes `/etc/audiobook/coordinator.env` and copies the compose project to `/opt/audiobook/coordinator`. The unit runs `docker compose -f /opt/audiobook/coordinator/docker-compose.dev.yml up -d`.
+3. That compose project runs Redis, PostgreSQL, and the coordinator. The coordinator creates tables on startup, including `nodes`. The database user and database name come from the compose file.
+4. Create bucket `audiobook-pipeline` on the configured S3 endpoint. MinIO is fine for the dev stand.
+5. Open the coordinator port to operators. The dev stand publishes Redis on `127.0.0.1` only. Public TLS is an operator proxy in front of port 8000.
 
 `config/coordinator.yaml` today lists `${API_KEY_1}` and `${API_KEY_2}` as if every key were static config. Implementation replaces that list with operator keys only. Node keys go in the `nodes` table, per ADR-005.
 
@@ -125,12 +123,12 @@ Do not commission a node against a coordinator that fails any of these.
 
 ## Worker node
 
-The supervisor runs on the host under systemd, as user `audiobook`, in group `docker`. It needs the Docker socket. Running the supervisor itself in a container would nest that socket and, on GPU nodes, the NVIDIA device mounts. ADR-003's "small host process" stands.
+The supervisor is a container started by `audiobook-supervisor.service`. The unit mounts `/var/run/docker.sock` and does not mount NVIDIA devices. `record-hardware.sh` on the host writes `/etc/audiobook/hardware.json` before the container starts. Worker containers still receive GPU access from the supervisor through the Docker socket.
 
 ### Install
 
-1. Install Docker Engine. On a TTS node, install the NVIDIA container toolkit and confirm `docker run --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` prints the GPU.
-2. Install Python 3.11 and a virtualenv at `/opt/audiobook-supervisor` with the supervisor dependencies from `supervisor/README.md`.
+1. Install Docker Engine. On a TTS node, install the NVIDIA container toolkit and confirm `docker run --gpus all nvidia/cuda:12.4.1-base-ubuntu22.04 nvidia-smi` prints the GPU. The installer does not install the NVIDIA driver.
+2. Do not install a supervisor virtualenv. `audiobookctl` writes the supervisor image build under `/opt/audiobook/supervisor` and starts it with `docker run`.
 3. Pick `node_id`. Lowercase slug, unique in this coordinator. Example: `gpu-study` or `vps-prep-1`. Write it to `/etc/audiobook/node_id`.
 4. On the coordinator, as an operator:
 
@@ -169,8 +167,8 @@ The supervisor runs on the host under systemd, as user `audiobook`, in group `do
 6. Copy `config/supervisor.yaml`. Set `node.id` from `NODE_ID`, the coordinator URL, image references pinned by digest, and the model mount for TTS. Image names in the sample config (`registry.example.com/...:latest`) are placeholders. Pin a digest before the accept step. A floating tag makes a later probe unreproducible.
 7. Create the model directory, owned by the user that will run inside the TTS container. The image does not contain weights. ADR-003 mounts them from the host.
 8. Add the node's address to the Redis firewall.
-9. Install a systemd unit `audiobook-supervisor.service`. `Restart=always`. `EnvironmentFile=/etc/audiobook/node.env`.
-10. Start the unit.
+9. Install `audiobook-supervisor.service`. `ExecStart` is `docker run` with `/var/run/docker.sock` mounted and `HARDWARE_FILE` set. `Restart=always`. `EnvironmentFile=/etc/audiobook/node.env`.
+10. Start the unit. The supervisor Python runs in the container, not from a host virtualenv.
 
 On startup the supervisor reads hardware and calls `POST /nodes/{node_id}/register`. The coordinator moves the row from `pending` to `commissioned`, stores the hardware JSON, and sets `effective_queues`. If the node has no GPU, `convert` is dropped from `effective_queues` and the response says so. The supervisor logs that and does not start TTS containers.
 

@@ -6,11 +6,14 @@ from cli.flows import (
     EXIT_OK,
     EXIT_PRECONDITION,
     EXIT_REBOOT,
+    _node_task,
     apply_node,
+    coordinator_packages,
     install_coordinator,
     install_node,
     install_standalone,
     invite_node,
+    node_packages,
     uninstall_coordinator,
     uninstall_node,
     update_role,
@@ -80,7 +83,18 @@ def test_coordinator_install_hides_the_operator_key_and_is_stable():
     secret = parse_env(env)["API_KEY_OPERATOR"]
     assert secret not in " ".join(messages)
     assert linux_paths()["coordinator_unit"] in host.units
-    assert "postgresql" in host.packages
+    assert host.packages == ["docker-ce"]
+    unit = host.units[linux_paths()["coordinator_unit"]]
+    assert "docker compose -f /opt/audiobook/coordinator/docker-compose.dev.yml up -d" in unit
+    assert "coordinator.main" not in unit
+    assert "venv" not in unit
+    installed = host.read(linux_paths()["coordinator_prefix"] + "/docker-compose.dev.yml")
+    assert "image: redis:7" in installed
+    assert "image: postgres:16" in installed
+    assert "dockerfile: coordinator.Dockerfile" in installed
+    acme = coordinator_state()
+    acme["tls"] = {"mode": "acme"}
+    assert "certbot" not in host.packages
     again = install_coordinator(host, coordinator_state(), [])
     assert again["changed"] is False
     assert parse_env(host.read(linux_paths()["coordinator_env"]))["API_KEY_OPERATOR"] == secret
@@ -143,6 +157,9 @@ def test_windows_node_task_and_prep_without_gpu():
     result = install_node(host, node_state(queues=["prep"]), FakeApi(), [])
     assert result["code"] == EXIT_OK
     assert "AudiobookSupervisor" in host.tasks
+    assert host.tasks["AudiobookSupervisor"] == _node_task()
+    assert "python.exe -m supervisor" not in host.tasks["AudiobookSupervisor"]
+    assert "Python.Python.3.11" not in host.packages
     assert host.units == {}
     linux = MemoryHost(gpu=False, ips=["10.0.0.5"])
     messages = []
@@ -153,7 +170,12 @@ def test_windows_node_task_and_prep_without_gpu():
     prep = MemoryHost(gpu=False, ips=["10.0.0.5"])
     assert install_node(prep, node_state(queues=["prep"]), FakeApi(), [])["code"] == EXIT_OK
     assert "nvidia-container-toolkit" not in prep.packages
-    assert "docker-ce" in prep.packages
+    assert prep.packages == ["docker-ce"]
+    node_unit = prep.units["audiobook-supervisor.service"]
+    assert "/var/run/docker.sock" in node_unit
+    assert "venv" not in node_unit
+    assert "--gpus" not in node_unit
+    assert "python3" not in prep.packages
 
 
 def test_non_root_writes_nothing():
@@ -205,6 +227,25 @@ def test_standalone_invites_a_local_node_and_checks_its_key():
     assert node_env["API_KEY"] != coordinator_env["API_KEY_OPERATOR"]
     assert ("health", "http://127.0.0.1:8000/api/v1") in api.calls
     assert ("invite", "local") in api.calls
+
+
+def test_residue_packages_are_docker_and_the_toolkit():
+    assert coordinator_packages({}) == ["docker-ce"]
+    assert coordinator_packages({"tls": {"mode": "acme"}}) == ["docker-ce"]
+    prep_code, prep_packages = node_packages({"queues": ["prep"]}, MemoryHost(gpu=False), False)
+    assert prep_code == EXIT_OK
+    assert prep_packages == ["docker-ce"]
+    convert_code, convert_packages = node_packages({"queues": ["convert"]}, MemoryHost(gpu=True), False)
+    assert convert_code == EXIT_OK
+    assert convert_packages == ["docker-ce", "nvidia-container-toolkit"]
+    assert "python3" not in convert_packages
+    ready_code, ready_packages = node_packages({"queues": ["prep"]}, MemoryHost(os_name="windows", docker_ready=True, gpu=False), True)
+    assert ready_code == EXIT_OK
+    assert ready_packages == []
+    missing = MemoryHost(os_name="windows", docker_ready=False, gpu=False)
+    missing_code, missing_packages = node_packages({"queues": ["prep"]}, missing, True)
+    assert missing_code == EXIT_OK
+    assert missing_packages == ["Docker.DockerDesktop"]
 
 
 def test_linux_package_command_is_apt():

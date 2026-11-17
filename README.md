@@ -89,7 +89,7 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 
 One Linux machine can run the whole pipeline. Extra workers use the same node install and point at that coordinator. Windows can run a worker. It cannot run the coordinator. Prep and TTS job processing are not in this slice. A probe container only proves the supervisor can register and exit.
 
-The installer is `audiobookctl`. It does not open SSH. Run it on the machine, or over SSH as one command. It installs Python, PostgreSQL, Redis, and Docker when they are missing. It does not install an NVIDIA driver. On Debian or Ubuntu, as root:
+The installer is `audiobookctl`. It does not open SSH. Run it on the machine, or over SSH as one command. It installs Docker Engine when that is missing. On a GPU node it also installs the NVIDIA container toolkit. It does not install an NVIDIA driver, PostgreSQL, Redis, or a host Python service. On Debian or Ubuntu, as root:
 
 ```bash
 PYTHONPATH=. python -m cli standalone install --state deploy/examples/standalone.example.yaml
@@ -107,7 +107,7 @@ PYTHONPATH=. python -m cli node invite \
 
 Copy the printed key into a node state file (see `deploy/examples/node.example.yaml`) and run `node install` on that host. `apply` changes config, `update --source <checkout>` replaces code and keeps keys, and `uninstall` removes the service. `--purge` also removes `/etc/audiobook`.
 
-`deploy/docker-compose.dev.yml` runs Redis, PostgreSQL, and the coordinator on localhost when you already have Docker and do not want the system installer. `deploy/accept-dev.sh` checks health, a 401, and the node list. Full install, address, and auth rules are in `docs/architecture/commissioning.md`.
+`deploy/docker-compose.dev.yml` is the coordinator install. It runs Redis, PostgreSQL, and the coordinator. `deploy/accept-dev.sh` checks health, a 401, and the node list. Full install, address, and auth rules are in `docs/architecture/commissioning.md`.
 
 ```bash
 PYTHONPATH=. python -m pytest

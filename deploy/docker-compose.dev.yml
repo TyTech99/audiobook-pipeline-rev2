@@ -1,5 +1,6 @@
-# One-box dependencies for local coordinator development.
-# The supervisor still runs on the host so it can use the Docker socket.
+# Redis, PostgreSQL, and the coordinator.
+# From the repo, `docker compose -f deploy/docker-compose.dev.yml up` uses this file.
+# audiobookctl installs a copy whose build context is the coordinator prefix.
 services:
   redis:
     image: redis:7

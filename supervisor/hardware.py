@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 
 def detect_hardware() -> dict:
+    recorded = os.environ.get("HARDWARE_FILE")
+    if recorded:
+        return json.loads(Path(recorded).read_text())
     cpu = 1
     ram_gb = 1.0
     try:
