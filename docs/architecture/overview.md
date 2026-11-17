@@ -8,6 +8,8 @@ The audiobook pipeline is a distributed job processing system with three main co
 2. **Workers** — Stateless processing units (prep or TTS)
 3. **Supervisors** — Per-node process managers that JIT-start workers
 
+Voice recipes live in a **separate git repo** from the pipeline code. This enables both systems to iterate independently.
+
 ## Component Responsibilities
 
 ### Coordinator
@@ -18,32 +20,67 @@ The audiobook pipeline is a distributed job processing system with three main co
 - Tracks job state and progress
 - Stores job metadata in PostgreSQL (persistent)
 - Uses Redis for job queues and real-time worker status
+- Fetches voice recipes from the recipe repo
+- Validates performance style against recipe's supported styles
 
 **Tech stack:** FastAPI, PostgreSQL, Redis
 
 ### Prep Worker (CPU)
 
 - Ingests PDF or EPUB files
-- Produces a "book package": clean EPUB + narrator script + page ledger
+- Produces a "book package": clean EPUB + narrator script + page ledger + cover art + metadata + LLM analysis
 - Validates page parity before completing
 - Uploads book package to S3 storage
 
-**Tech stack:** Python, PyMuPDF (PDF parsing), Calibre (EPUB manipulation), Redis client
+**Cover art handling:**
+1. Extract from source (PDF/EPUB)
+2. Search the internet (by title + author)
+3. Flag for generation (if not found)
+
+**Metadata extraction:**
+1. Extract from PDF/EPUB metadata (PyMuPDF `doc.metadata`, XMP stream)
+2. Extract ISBN from first 10-15 pages, look up metadata via isbnlib (Google Books, Open Library)
+3. First-page layout analysis (largest font = title, subsequent text = author)
+4. Internet search by title + author (if extraction fails)
+
+**LLM analysis:**
+- Book subject summary
+- Author's tone analysis
+- At least three narration style recommendations
+- Suggested voice recipes matching the book's content
+
+**Tech stack:** Python, PyMuPDF (PDF parsing), Calibre (EPUB manipulation), isbnlib, LLM, Redis client
 
 **Input formats:** PDF, EPUB
-**Output:** Book package (EPUB + script.json + page-ledger.json)
+**Output:** Book package (EPUB + script.json + page-ledger.json + cover.jpg + metadata.json + llm-analysis.json)
 
 ### TTS Worker (GPU)
 
 - Consumes book packages from the convert queue
-- Applies a voice recipe to the narrator script
-- Produces audio chunks and assembles final audiobook
-- Uploads audio to S3 storage
+- Runs the full pipeline inside the recipe's Docker container: LLM annotation → TTS generation → mastering → packaging
+- Uploads the audiobook package to S3 storage
 
-**Tech stack:** Python, PyTorch, TTS engine (Chatterbox/Higgs V3), ffmpeg, Redis client
+**Pipeline stages (inside the recipe's Docker container):**
 
-**Input:** Book package + voice recipe
-**Output:** Audiobook (MP3/M4B) + segment metadata
+1. **LLM Annotation** — Annotates the clean script with engine-specific markup (emotion, pacing, pauses). Chapters run in parallel; chunks within a chapter run serially with state passing. Chapters are emotional reset points.
+2. **TTS Generation** — Generates audio from the annotated script using the voice recipe's TTS engine.
+3. **Mastering** — Applies the mastering chain (EQ, compression, loudness, noise floor, room tone).
+4. **Packaging** — Assembles the final audiobook package (M4B + MP3 chapters + credits + sample + metadata + QC report).
+
+**Parallelism model:**
+- Chapters are the unit of parallelism (annotation and TTS)
+- Chunks/segments within a chapter are serial (state dependency)
+- Chapters are reset points for emotional and audio state
+
+**LLM slot capabilities:**
+- Cloud LLMs: unlimited parallel slots
+- Local LLMs: seat count declared in worker registration
+- The coordinator schedules chapter annotation based on available slots
+
+**Tech stack:** Python, PyTorch, TTS engine (Chatterbox/Higgs V3), LLM (for annotation), FFmpeg (mastering/packaging), Redis client
+
+**Input:** Book package + voice recipe + performance style
+**Output:** Audiobook package (M4B + MP3 chapters + credits + sample + metadata + QC report)
 
 ### Supervisor
 
@@ -59,27 +96,34 @@ The audiobook pipeline is a distributed job processing system with three main co
 ## Data Flow
 
 ```
+Phase 1: Prep
 1. User submits job
-   POST /jobs {input_pdf: "s3://...", type: "pdf_to_audiobook"}
+   POST /jobs {input_pdf: "s3://...", type: "prep"}
    
 2. Coordinator creates job record, enqueues to "prep"
    
 3. Prep worker claims job from "prep" queue
    - Downloads input from S3
    - Processes (PDF/EPUB → book package)
+   - Extracts cover art, metadata, LLM analysis
    - Validates page parity
    - Uploads book package to S3
-   - Enqueues convert job to "convert" queue
-   - Marks prep job complete
+   - Marks prep job complete (status: prep_complete)
+
+Phase 2: Audio
+4. User submits Phase 2 job
+   POST /jobs {book_package_id: "uuid", voice_recipe: {...}, performance_style: "noir-mystery", type: "convert"}
    
-4. TTS worker claims job from "convert" queue
+5. Coordinator validates performance style against recipe, enqueues to "convert"
+   
+6. TTS worker claims job from "convert" queue
    - Downloads book package from S3
-   - Applies voice recipe
-   - Generates audio
-   - Uploads audiobook to S3
-   - Marks job complete
+   - Pulls voice recipe Docker image
+   - Runs: LLM annotation → TTS generation → mastering → packaging
+   - Uploads audiobook package to S3
+   - Marks job complete (status: complete)
    
-5. User retrieves audiobook
+7. User retrieves audiobook
    GET /jobs/{id} → {status: "complete", output: "s3://..."}
 ```
 
@@ -114,9 +158,35 @@ POST /workers/register
     "ram_gb": 15,
     "gpu": null,
     "tools": {"pdf_to_epub": true, "tts": false},
-    "models": []
+    "models": [],
+    "llm_slots": 4
   },
   "queues": ["prep"],
+  "working_hours": {
+    "start": "22:00",
+    "end": "08:00",
+    "timezone": "America/New_York"
+  }
+}
+```
+
+For TTS workers:
+
+```json
+POST /workers/register
+{
+  "worker_id": "unique-uuid",
+  "node_id": "gpu-1",
+  "type": "tts",
+  "capabilities": {
+    "cpu": 16,
+    "ram_gb": 64,
+    "gpu": {"model": "RTX 4090", "vram_gb": 24},
+    "tools": {"tts": true},
+    "models": [],
+    "llm_slots": 8
+  },
+  "queues": ["convert"],
   "working_hours": {
     "start": "22:00",
     "end": "08:00",
@@ -138,17 +208,24 @@ s3://audiobook-pipeline/
 │   └── {job_id}/
 │       ├── book.epub
 │       ├── script.json
-│       └── page-ledger.json
+│       ├── page-ledger.json
+│       ├── cover.jpg
+│       ├── metadata.json
+│       ├── llm-analysis.json
+│       └── manifest.json
 ├── audio/
 │   └── {job_id}/
-│       ├── segments/
-│       │   ├── chapter-001/
-│       │   │   ├── seg-001.mp3
-│       │   │   └── ...
-│       │   └── ...
-│       ├── final/
-│       │   └── audiobook.mp3
-│       └── metadata.json
+│       ├── m4b/
+│       │   └── audiobook.m4b
+│       ├── mp3/
+│       │   ├── opening-credits.mp3
+│       │   ├── chapter-001.mp3
+│       │   ├── chapter-002.mp3
+│       │   ├── ...
+│       │   ├── closing-credits.mp3
+│       │   └── retail-sample.mp3
+│       ├── metadata.json
+│       └── qc-report.json
 └── logs/
     └── {job_id}/
         └── worker.log
