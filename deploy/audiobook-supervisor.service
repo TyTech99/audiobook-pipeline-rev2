@@ -1,0 +1,14 @@
+[Unit]
+Description=Audiobook node supervisor
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=audiobook
+EnvironmentFile=/etc/audiobook/node.env
+ExecStart=/opt/audiobook/supervisor/venv/bin/python -m supervisor.supervisor
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

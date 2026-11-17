@@ -49,7 +49,8 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 │   │   ├── coordinator.md    ← Coordinator API and logic
 │   │   ├── worker-prep.md    ← Prep worker (PDF/EPUB → book package)
 │   │   ├── worker-tts.md     ← TTS worker (book package → audio)
-│   │   └── supervisor.md     ← Node supervisor (JIT container management)
+│   │   ├── supervisor.md     ← Node supervisor (JIT container management)
+│   │   └── commissioning.md  ← Install, accept, and remove coordinator and nodes
 │   ├── data-models/          ← Data schemas and formats
 │   │   ├── job-schema.md     ← Job payload and state machine
 │   │   ├── book-package.md   ← EPUB + script + ledger structure
@@ -63,7 +64,8 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 │       ├── 001-redis-queue.md
 │       ├── 002-page-parity.md
 │       ├── 003-jit-workers.md
-│       └── 004-voice-agnostic-prep.md
+│       ├── 004-voice-agnostic-prep.md
+│       └── 005-node-commissioning.md
 ├── schemas/                  ← JSON schemas for validation
 │   ├── job.json
 │   ├── book-package.json
@@ -75,42 +77,40 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 │   ├── worker-tts.yaml
 │   └── supervisor.yaml
 ├── coordinator/              ← Coordinator service (FastAPI)
+├── cli/                      ← audiobookctl install, apply, update, uninstall
+├── deploy/                   ← Compose file, probe image, example state files
 ├── worker/
 │   ├── prep/                 ← Prep worker (PDF/EPUB ingestion)
 │   └── tts/                  ← TTS worker (audio generation)
 └── supervisor/               ← Node supervisor (JIT container management)
 ```
 
-## Quick Start (Developer)
+## Quick Start
 
-### Prerequisites
+One Linux machine can run the whole pipeline. Extra workers use the same node install and point at that coordinator. Windows can run a worker. It cannot run the coordinator. Prep and TTS job processing are not in this slice. A probe container only proves the supervisor can register and exit.
 
-- Python 3.11+
-- Redis 7+
-- Docker (for workers)
-- S3-compatible storage (MinIO for local dev)
-
-### Local Development
+The installer is `audiobookctl`. It does not open SSH. Run it on the machine, or over SSH as one command. It installs Python, PostgreSQL, Redis, and Docker when they are missing. It does not install an NVIDIA driver. On Debian or Ubuntu, as root:
 
 ```bash
-# Start Redis
-docker run -d -p 6379:6379 redis:7
+PYTHONPATH=. python -m cli standalone install --state deploy/examples/standalone.example.yaml
+```
 
-# Start MinIO (S3-compatible storage)
-docker run -d -p 9000:9000 -p 9001:9001 \
-  -e MINIO_ROOT_USER=admin \
-  -e MINIO_ROOT_PASSWORD=password \
-  minio/minio server /data
+Drop `convert` from that file when the machine has no GPU. A later machine joins with:
 
-# Start coordinator
-cd coordinator
-pip install -r requirements.txt
-uvicorn main:app --host 0.0.0.0 --port 8000
+```bash
+PYTHONPATH=. python -m cli node invite \
+  --coordinator-url http://127.0.0.1:8000/api/v1 \
+  --operator-api-key "$API_KEY_OPERATOR" \
+  --node-id gpu-study --queues convert \
+  --redis-host 10.0.0.5 --json
+```
 
-# Start a prep worker
-cd worker/prep
-pip install -r requirements.txt
-python worker.py --config ../../config/worker-prep.yaml
+Copy the printed key into a node state file (see `deploy/examples/node.example.yaml`) and run `node install` on that host. `apply` changes config, `update --source <checkout>` replaces code and keeps keys, and `uninstall` removes the service. `--purge` also removes `/etc/audiobook`.
+
+`deploy/docker-compose.dev.yml` runs Redis, PostgreSQL, and the coordinator on localhost when you already have Docker and do not want the system installer. `deploy/accept-dev.sh` checks health, a 401, and the node list. Full install, address, and auth rules are in `docs/architecture/commissioning.md`.
+
+```bash
+PYTHONPATH=. python -m pytest
 ```
 
 ## Key Concepts
@@ -156,16 +156,18 @@ queues:
 
 ## Status
 
-**Phase: Design / MVP Planning**
+**Phase: Commissioning slice**
 
 - [x] Architecture design
 - [x] Data model definitions
 - [x] API specifications
-- [ ] Coordinator implementation
+- [x] Coordinator commissioning API
+- [x] Supervisor registration and probe loop
+- [x] `audiobookctl` install, apply, update, uninstall
 - [ ] Prep worker implementation
 - [ ] TTS worker implementation
-- [ ] Supervisor implementation
-- [ ] End-to-end testing
+- [ ] JIT start and stop of real prep and TTS images
+- [ ] End-to-end job testing
 
 ## Contributing
 

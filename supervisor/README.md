@@ -8,6 +8,8 @@ Lightweight daemon that runs on each worker node. Detects hardware, registers wi
 
 - [Architecture Overview](../docs/architecture/overview.md)
 - [ADR-003: JIT Workers](../docs/decisions/003-jit-workers.md)
+- [ADR-005: Node Commissioning](../docs/decisions/005-node-commissioning.md)
+- [Commissioning](../docs/architecture/commissioning.md)
 
 ## Planned Structure
 

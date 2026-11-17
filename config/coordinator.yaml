@@ -1,5 +1,7 @@
 # Coordinator Configuration
 
+coordinator_id: "${COORDINATOR_ID}"
+
 server:
   host: "0.0.0.0"
   port: 8000
@@ -26,9 +28,8 @@ s3:
   region: "us-east-1"
 
 auth:
-  api_keys:
-    - "${API_KEY_1}"
-    - "${API_KEY_2}"
+  operator_api_keys:
+    - "${API_KEY_OPERATOR}"
 
 queues:
   prep: "prep"
@@ -43,6 +44,7 @@ job:
 worker:
   heartbeat_timeout_seconds: 120
   heartbeat_interval_seconds: 30
+  probe_timeout_seconds: 90
 
 logging:
   level: "INFO"

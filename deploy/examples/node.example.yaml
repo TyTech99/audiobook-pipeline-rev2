@@ -1,0 +1,20 @@
+role: node
+node_id: gpu-study
+display_name: study GPU box
+coordinator_url: https://coordinator.example:8000/api/v1
+coordinator_id: ""
+coordinator_ca_file: ""
+queues:
+  - convert
+working_hours:
+  enabled: true
+  start: "22:00"
+  end: "08:00"
+  timezone: America/New_York
+node_api_key: ""
+operator_api_key: ""
+probe_image: audiobook-probe:dev
+redis:
+  host: 10.0.0.5
+  port: 6379
+  password: ""

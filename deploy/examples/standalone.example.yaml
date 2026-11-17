@@ -1,0 +1,19 @@
+role: standalone
+node_id: local
+coordinator_id: ""
+api_url: http://127.0.0.1:8000/api/v1
+redis_bind: 127.0.0.1
+redis_advertise: 127.0.0.1
+s3_endpoint: ""
+operator_api_key: ""
+tls:
+  mode: off
+queues:
+  - prep
+  - convert
+working_hours:
+  enabled: false
+  start: "00:00"
+  end: "23:59"
+  timezone: UTC
+probe_image: audiobook-probe:dev

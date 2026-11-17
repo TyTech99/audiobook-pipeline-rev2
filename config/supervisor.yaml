@@ -7,6 +7,8 @@ node:
 coordinator:
   url: "http://coordinator:8000/api/v1"
   api_key: "${API_KEY}"
+  coordinator_id: "${COORDINATOR_ID}"
+  ca_file: "${COORDINATOR_CA_FILE}"
 
 redis:
   host: "redis"
@@ -19,6 +21,7 @@ docker:
   images:
     prep: "registry.example.com/audiobook/worker-prep:latest"
     tts: "registry.example.com/audiobook/worker-tts:latest"
+    probe: "audiobook-probe:dev"
 
 working_hours:
   enabled: true

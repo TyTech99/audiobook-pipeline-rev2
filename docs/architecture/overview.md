@@ -145,6 +145,8 @@ Redis lists are used as job queues:
 
 ## Worker Registration
 
+A machine joins the fleet as a **node** before any container starts. The supervisor heartbeats the node. Containers still register as workers when they start. Node invite, probe, drain, and decommission are specified in [Commissioning](commissioning.md) and [ADR-005](../decisions/005-node-commissioning.md).
+
 Workers register with the coordinator on startup:
 
 ```json
@@ -195,7 +197,9 @@ POST /workers/register
 }
 ```
 
-Workers send heartbeats every 30 seconds. If the coordinator doesn't receive a heartbeat for 2 minutes, the worker is marked offline and its in-progress jobs are returned to the queue.
+The supervisor sends those `working_hours`, and the node row keeps them. A worker registration may repeat the block, but the coordinator does not let the container change the node's hours or queues.
+
+Workers send heartbeats every 30 seconds. The supervisor does the same for the node. If the coordinator receives no worker heartbeat for 2 minutes, that container is marked offline and its in-progress jobs are returned to the queue. A missed supervisor heartbeat marks the node offline and leaves the node record in place.
 
 ## Storage Layout
 
@@ -233,8 +237,8 @@ s3://audiobook-pipeline/
 
 ## Scaling
 
-- **Add more prep workers:** Run more supervisors on CPU nodes. They automatically register and start claiming from the `prep` queue.
-- **Add more TTS workers:** Run more supervisors on GPU nodes. They register with GPU capabilities and claim from the `convert` queue.
+- **Add a prep node:** Commission a CPU machine with the supervisor. The node record is durable. Containers register only while they run. Steps are in [Commissioning](commissioning.md).
+- **Add a TTS node:** Same procedure on a GPU machine. `convert` stays off `effective_queues` unless the hardware report includes a GPU.
 - **Scale the coordinator:** The coordinator is stateless (state is in PostgreSQL + Redis). Run multiple instances behind a load balancer if needed.
 
 ## Failure Modes
@@ -245,12 +249,11 @@ s3://audiobook-pipeline/
 | Worker node dies | Missed heartbeat | Same as above |
 | Job processing error | Worker reports failure | Job retried up to 3 times, then moved to `failed` queue |
 | Storage unavailable | Upload/download error | Job retried with exponential backoff |
-| Coordinator down | Workers can't register/claim | Workers queue jobs locally, retry when coordinator is back |
+| Coordinator down | Workers can't register or heartbeat | Workers keep claiming from Redis and retry coordinator calls when it returns. They do not spool jobs on the node. |
 
 ## Security
 
-- All inter-service communication over TLS
-- S3 access via IAM roles (no long-lived credentials)
-- Redis with password authentication
-- Coordinator API with API key authentication
-- Workers authenticate to coordinator with signed tokens
+- Coordinator and supervisor traffic uses HTTPS. HTTP is only for a single-host dev stand bound to localhost.
+- Two API key classes, operator and per-node. See [ADR-005](../decisions/005-node-commissioning.md). Signed tokens are not part of v1.
+- Redis requires a password, and the port accepts connections only from the coordinator host and commissioned nodes. A node API key does not gate `BRPOP`.
+- S3 credentials are injected by the supervisor when it starts a container. They are not baked into the worker image.

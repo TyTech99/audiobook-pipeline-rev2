@@ -8,6 +8,7 @@ FastAPI service that manages job submission, routing, and worker registration.
 
 - [Architecture Overview](../docs/architecture/overview.md)
 - [Coordinator API](../docs/api/coordinator-api.md)
+- [Commissioning](../docs/architecture/commissioning.md)
 - [Job Schema](../docs/data-models/job-schema.md)
 
 ## Planned Structure
