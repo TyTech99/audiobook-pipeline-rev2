@@ -139,14 +139,18 @@ class TTSWorker:
 
     def _upload(self, job_id: str, output_dir) -> str:
         import pathlib
+        import shutil
 
         output_prefix = self.settings.get("output_prefix") or f"s3://bucket/audio/{job_id}/"
         if output_prefix.startswith("file://"):
             dest = pathlib.Path(output_prefix[len("file://"):])
             dest.mkdir(parents=True, exist_ok=True)
-            for f in pathlib.Path(output_dir).iterdir():
-                if f.is_file():
-                    (dest / f.name).write_bytes(f.read_bytes())
+            shutil.copytree(output_dir, dest, dirs_exist_ok=True)
+            return str(dest) + "/"
+        if output_prefix.endswith("/"):
+            dest = pathlib.Path(output_prefix)
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(output_dir, dest, dirs_exist_ok=True)
             return str(dest) + "/"
         return f"s3://bucket/audio/{job_id}/"
 

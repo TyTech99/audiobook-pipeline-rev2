@@ -153,6 +153,25 @@ def test_tts_worker_process_job(tmp_path):
     assert runner.calls[0]["image"] == "test-recipe:latest"
     assert any("complete" in c["url"] for c in http.calls)
 
+    out = pathlib.Path(output_prefix)
+    m4b_path = out / "m4b" / "audiobook.m4b"
+    assert m4b_path.exists()
+    m4b_data = m4b_path.read_bytes()
+    assert m4b_data[4:8] == b"ftyp"
+    assert m4b_data[8:12] == b"M4B "
+    assert b"stik" in m4b_data
+    stik_idx = m4b_data.find(b"stik")
+    stik_value = struct.unpack(">I", m4b_data[stik_idx + 4 : stik_idx + 8])[0]
+    assert stik_value == 2
+
+    assert (out / "mp3" / "chapter-001.mp3").exists()
+    assert (out / "mp3" / "opening-credits.mp3").exists()
+    assert (out / "mp3" / "closing-credits.mp3").exists()
+    assert (out / "mp3" / "retail-sample.mp3").exists()
+
+    errors = validate_audiobook_output(str(out))
+    assert errors == []
+
 
 def test_tts_worker_fails_on_nonzero_exit(tmp_path):
     input_dir = tmp_path / "input"
