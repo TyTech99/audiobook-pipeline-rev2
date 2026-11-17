@@ -89,7 +89,7 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 
 Run `audiobookctl` from a checkout of this repo. Linux is Debian or Ubuntu, as root. Windows can install a node only. Python 3 is already installed. The CLI installs Docker. It does not install an NVIDIA driver. Prep and TTS do not process jobs yet. A node install starts the supervisor.
 
-Copy a file from `deploy/examples/` and pass it as `--state`. The operator key and Redis password land in `/etc/audiobook/coordinator.env`. Port, TLS, and accept rules are in `docs/architecture/commissioning.md`.
+Copy a file from `deploy/examples/` and pass it as `--state`. The operator key and Redis password land in `/etc/audiobook/coordinator.env`. The CLI reads `redis_bind` from the state file and binds the copied compose file to that address. Port, TLS, and accept rules are in `docs/architecture/commissioning.md`.
 
 ### Single Linux machine
 
@@ -101,7 +101,7 @@ sudo PYTHONPATH=. python3 -m cli standalone install --state deploy/examples/stan
 
 ### Coordinator, Linux
 
-`deploy/docker-compose.dev.yml` publishes Redis, PostgreSQL, and the API on `127.0.0.1`. Change those bindings to this host's private IP before install when other machines must connect, and put that IP in the state file.
+Set `api_url`, `redis_bind`, and `redis_advertise` in the state file to this host's private IP when other machines must connect. The CLI binds the copied compose file to `redis_bind`.
 
 ```bash
 sudo PYTHONPATH=. python3 -m cli coordinator install --state deploy/examples/coordinator.example.yaml
@@ -109,14 +109,14 @@ sudo PYTHONPATH=. python3 -m cli coordinator install --state deploy/examples/coo
 
 ### Prep node
 
-Invite on the coordinator. `--json` prints `node_api_key`. Put that key, `queues: [prep]`, and the coordinator's `REDIS_PASSWORD` in a copy of `deploy/examples/node.example.yaml`.
+Invite on the coordinator. `--json` prints `node_api_key`. Pass `--redis-password` to include it in the JSON. Put that key, `queues: [prep]`, and the Redis password in a copy of `deploy/examples/node.example.yaml`.
 
 ```bash
 sudo PYTHONPATH=. python3 -m cli node invite \
   --coordinator-url http://10.0.0.5:8000/api/v1 \
   --operator-api-key "$API_KEY_OPERATOR" \
   --node-id vps-prep-1 --queues prep \
-  --redis-host 10.0.0.5 --json
+  --redis-host 10.0.0.5 --redis-password "$REDIS_PASSWORD" --json
 ```
 
 Linux:

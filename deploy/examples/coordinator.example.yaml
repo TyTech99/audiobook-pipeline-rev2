@@ -1,13 +1,9 @@
 role: coordinator
 coordinator_id: ""
-api_url: https://coordinator.example:8000/api/v1
-bind_host: 0.0.0.0
-postgres_db: audiobook
+api_url: http://10.0.0.5:8000/api/v1
 redis_bind: 10.0.0.5
 redis_advertise: 10.0.0.5
 s3_endpoint: ""
 operator_api_key: ""
 tls:
-  mode: provided
-  cert_file: /etc/audiobook/tls/fullchain.pem
-  key_file: /etc/audiobook/tls/privkey.pem
+  mode: off

@@ -110,6 +110,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
     invite.add_argument("--queues", default="prep")
     invite.add_argument("--redis-host", required=True)
     invite.add_argument("--redis-port", type=int, default=6379)
+    invite.add_argument("--redis-password", default="")
 
     standalone = sub.add_parser("standalone")
     ssub = standalone.add_subparsers(dest="action", required=True)
@@ -147,6 +148,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
                 [item.strip() for item in args.queues.split(",") if item.strip()],
                 args.redis_host,
                 args.redis_port,
+                args.redis_password,
             )
             payload["code"] = 0
         except Exception as exc:

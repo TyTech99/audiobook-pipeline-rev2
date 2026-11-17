@@ -203,11 +203,22 @@ def test_url_policy():
 
 def test_invite_payload():
     api = FakeApi()
-    payload = invite_node(api, "http://10.0.0.5:8000/api/v1", "operator-secret", "gpu-study", ["convert"], "10.0.0.5", 6379)
+    payload = invite_node(api, "http://10.0.0.5:8000/api/v1", "operator-secret", "gpu-study", ["convert"], "10.0.0.5", 6379, "redis-secret")
     assert payload["coordinator_id"] == "coord-fixed"
     assert payload["coordinator_url"].startswith("http://10.0.0.5")
-    assert payload["redis"] == {"host": "10.0.0.5", "port": 6379}
+    assert payload["redis"] == {"host": "10.0.0.5", "port": 6379, "password": "redis-secret"}
     assert payload["node_api_key"] == "node-secret"
+
+
+def test_coordinator_install_binds_redis_to_the_state_file():
+    host = MemoryHost()
+    state = coordinator_state()
+    state["redis_bind"] = "10.0.0.5"
+    state["redis_advertise"] = "10.0.0.5"
+    install_coordinator(host, state, [])
+    compose = host.read(linux_paths()["coordinator_prefix"] + "/docker-compose.dev.yml")
+    assert '"10.0.0.5:6379:6379"' in compose
+    assert '"127.0.0.1:6379:6379"' not in compose
 
 
 def test_standalone_invites_a_local_node_and_checks_its_key():

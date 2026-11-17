@@ -116,7 +116,7 @@ def install_coordinator(host, state: dict, messages: list[str]) -> dict:
     host.install_packages(coordinator_packages(state))
     host.write(paths["coordinator_env"], text)
     host.write(paths["coordinator_prefix"] + "/REVISION", "installed")
-    _install_coordinator_files(host, paths["coordinator_prefix"])
+    _install_coordinator_files(host, paths["coordinator_prefix"], state)
     host.install_unit(paths["coordinator_unit"], unit)
     messages.append("coordinator installed")
     return {"code": EXIT_OK, "changed": True}
@@ -290,7 +290,7 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
     return node_result
 
 
-def invite_node(api, coordinator_url: str, operator_key: str, node_id: str, queues: list[str], redis_host: str, redis_port: int) -> dict:
+def invite_node(api, coordinator_url: str, operator_key: str, node_id: str, queues: list[str], redis_host: str, redis_port: int, redis_password: str = "") -> dict:
     validate_api_url(coordinator_url)
     health = api.health(coordinator_url)
     created = api.invite(
@@ -302,7 +302,7 @@ def invite_node(api, coordinator_url: str, operator_key: str, node_id: str, queu
         "node_api_key": created["node_api_key"],
         "coordinator_id": health.get("coordinator_id") or created.get("coordinator_id"),
         "coordinator_url": coordinator_url,
-        "redis": {"host": redis_host, "port": redis_port},
+        "redis": {"host": redis_host, "port": redis_port, "password": redis_password},
     }
 
 
@@ -319,13 +319,15 @@ def _copy_tree(host, source: Path, dest_root: str) -> None:
         host.write(dest_root + "/" + path.relative_to(source).as_posix(), path.read_text())
 
 
-def _install_coordinator_files(host, prefix: str) -> None:
+def _install_coordinator_files(host, prefix: str, state: dict) -> None:
     root = _repo_root()
     compose = (root / "deploy" / "docker-compose.dev.yml").read_text()
     compose = compose.replace("context: ..", "context: .").replace(
         "dockerfile: deploy/coordinator.Dockerfile",
         "dockerfile: coordinator.Dockerfile",
     )
+    bind = state.get("redis_bind") or "127.0.0.1"
+    compose = compose.replace('      - "127.0.0.1:6379:6379"', f'      - "{bind}:6379:6379"')
     host.write(prefix + "/docker-compose.dev.yml", compose)
     host.write(prefix + "/coordinator.Dockerfile", (root / "deploy" / "coordinator.Dockerfile").read_text())
     _copy_tree(host, root / "coordinator", prefix + "/coordinator")
