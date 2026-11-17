@@ -1,0 +1,47 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Job Submission",
+  "type": "object",
+  "required": ["type", "input_format", "input_url"],
+  "properties": {
+    "type": {
+      "type": "string",
+      "enum": ["pdf_to_audiobook", "epub_to_audiobook", "pdf_to_epub", "epub_to_script"]
+    },
+    "input_format": {
+      "type": "string",
+      "enum": ["pdf", "epub"]
+    },
+    "input_url": {
+      "type": "string",
+      "format": "uri",
+      "pattern": "^s3://"
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "output_format": {
+          "type": "string",
+          "enum": ["mp3", "m4b", "wav"],
+          "default": "mp3"
+        },
+        "bitrate": {
+          "type": "string",
+          "default": "192k"
+        },
+        "narration_policy": {
+          "type": "string",
+          "default": "default"
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "title": {"type": "string"},
+        "author": {"type": "string"},
+        "customer_id": {"type": "string"}
+      }
+    }
+  }
+}

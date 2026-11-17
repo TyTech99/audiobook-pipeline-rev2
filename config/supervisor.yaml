@@ -1,0 +1,39 @@
+# Supervisor Configuration
+
+node:
+  id: "${NODE_ID}"
+  name: "vps-1"
+
+coordinator:
+  url: "http://coordinator:8000/api/v1"
+  api_key: "${API_KEY}"
+
+redis:
+  host: "redis"
+  port: 6379
+  password: "${REDIS_PASSWORD}"
+  db: 0
+
+docker:
+  socket: "/var/run/docker.sock"
+  images:
+    prep: "registry.example.com/audiobook/worker-prep:latest"
+    tts: "registry.example.com/audiobook/worker-tts:latest"
+
+working_hours:
+  enabled: true
+  start: "22:00"
+  end: "08:00"
+  timezone: "America/New_York"
+
+idle:
+  timeout_minutes: 5
+  check_interval_seconds: 30
+
+heartbeat:
+  interval_seconds: 30
+
+logging:
+  level: "INFO"
+  format: "json"
+  file: "/var/log/supervisor.log"

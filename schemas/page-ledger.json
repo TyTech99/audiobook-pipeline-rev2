@@ -1,0 +1,63 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Page Ledger",
+  "type": "object",
+  "required": ["source_format", "source_file", "pages", "structure", "summary"],
+  "properties": {
+    "source_format": {
+      "type": "string",
+      "enum": ["pdf", "epub"]
+    },
+    "source_file": {
+      "type": "string"
+    },
+    "total_pages": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["page", "action", "reason", "section"],
+        "properties": {
+          "page": {"type": "integer", "minimum": 1},
+          "action": {"type": "string", "enum": ["kept", "skipped"]},
+          "reason": {"type": "string", "minLength": 1},
+          "section": {"type": "string", "minLength": 1},
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "structure": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["section", "pages"],
+        "properties": {
+          "section": {"type": "string"},
+          "title": {"type": "string"},
+          "number": {"type": "integer"},
+          "pages": {"type": "array", "items": {"type": "integer"}}
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "kept", "skipped"],
+      "properties": {
+        "total": {"type": "integer"},
+        "kept": {"type": "integer"},
+        "skipped": {"type": "integer"},
+        "skipped_breakdown": {
+          "type": "object",
+          "additionalProperties": {"type": "integer"}
+        }
+      }
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

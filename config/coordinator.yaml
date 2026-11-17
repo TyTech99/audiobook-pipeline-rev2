@@ -1,0 +1,49 @@
+# Coordinator Configuration
+
+server:
+  host: "0.0.0.0"
+  port: 8000
+  workers: 4
+
+redis:
+  host: "redis"
+  port: 6379
+  password: "${REDIS_PASSWORD}"
+  db: 0
+
+postgres:
+  host: "postgres"
+  port: 5432
+  database: "audiobook"
+  user: "audiobook"
+  password: "${POSTGRES_PASSWORD}"
+
+s3:
+  endpoint: "${S3_ENDPOINT}"
+  bucket: "audiobook-pipeline"
+  access_key: "${S3_ACCESS_KEY}"
+  secret_key: "${S3_SECRET_KEY}"
+  region: "us-east-1"
+
+auth:
+  api_keys:
+    - "${API_KEY_1}"
+    - "${API_KEY_2}"
+
+queues:
+  prep: "prep"
+  convert: "convert"
+  failed: "failed"
+
+job:
+  max_retries: 3
+  visibility_timeout_seconds: 3600
+  progress_interval_seconds: 30
+
+worker:
+  heartbeat_timeout_seconds: 120
+  heartbeat_interval_seconds: 30
+
+logging:
+  level: "INFO"
+  format: "json"

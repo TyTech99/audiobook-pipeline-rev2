@@ -1,0 +1,93 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Narrator Script",
+  "type": "object",
+  "required": ["book_id", "job_id", "title", "author", "chapters", "metadata"],
+  "properties": {
+    "book_id": {"type": "string"},
+    "job_id": {"type": "string"},
+    "title": {"type": "string"},
+    "author": {"type": "string"},
+    "source_format": {"type": "string", "enum": ["pdf", "epub"]},
+    "source_file": {"type": "string"},
+    "language": {"type": "string"},
+    "chapters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["chapter", "title", "section", "segments"],
+        "properties": {
+          "chapter": {"type": "integer", "minimum": 1},
+          "title": {"type": "string"},
+          "section": {"type": "string"},
+          "source_ref": {"type": "string"},
+          "segments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "text", "source_ref", "section", "content_type"],
+              "properties": {
+                "id": {"type": "string", "pattern": "^seg-\\d{3,}$"},
+                "text": {"type": "string", "minLength": 1},
+                "source_ref": {"type": "string"},
+                "section": {"type": "string"},
+                "content_type": {
+                  "type": "string",
+                  "enum": [
+                    "body_text",
+                    "chapter_heading",
+                    "section_heading",
+                    "dialogue",
+                    "epigraph",
+                    "dedication",
+                    "table",
+                    "footnote",
+                    "note"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "frontmatter": {
+      "type": "object",
+      "properties": {
+        "dedication": {
+          "type": "object",
+          "properties": {
+            "text": {"type": "string"},
+            "source_ref": {"type": "string"},
+            "section": {"type": "string"}
+          }
+        },
+        "epigraphs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chapter": {"type": "integer"},
+              "text": {"type": "string"},
+              "source_ref": {"type": "string"},
+              "section": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["total_segments", "total_chapters", "created_at"],
+      "properties": {
+        "total_segments": {"type": "integer"},
+        "total_chapters": {"type": "integer"},
+        "total_pages": {"type": "integer"},
+        "narrated_pages": {"type": "integer"},
+        "estimated_word_count": {"type": "integer"},
+        "estimated_duration_minutes": {"type": "integer"},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}
