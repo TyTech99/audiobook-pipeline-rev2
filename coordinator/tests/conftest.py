@@ -54,9 +54,11 @@ def app(settings):
 @pytest.fixture
 def clean_db(app):
     pool = app.app.state.pool
+    redis_client = app.app.state.redis
     with pool.connection() as conn:
-        conn.execute("TRUNCATE nodes CASCADE")
+        conn.execute("TRUNCATE jobs, nodes, workers, probes CASCADE")
         conn.commit()
+    redis_client.flushdb()
     yield
 
 

@@ -52,3 +52,34 @@ class WorkerHeartbeatIn(BaseModel):
     status: str
     current_job: str | None = None
     queue_depth: int | None = None
+
+
+class JobSubmitIn(BaseModel):
+    type: str
+    input_format: str
+    input_url: str
+    metadata: dict = Field(default_factory=dict)
+
+
+class JobProgressIn(BaseModel):
+    stage: str
+    percent: int | None = None
+    current_page: int | None = None
+    total_pages: int | None = None
+    current_chapter: int | None = None
+    total_chapters: int | None = None
+    current_segment: int | None = None
+    total_segments: int | None = None
+    estimated_minutes_remaining: int | None = None
+    message: str | None = None
+
+
+class JobCompleteIn(BaseModel):
+    package_url: str | None = None
+    output_url: str | None = None
+    total_pages: int | None = None
+    kept_pages: int | None = None
+    skipped_pages: int | None = None
+    voice_recipe: dict | None = None
+    performance_style: str | None = None
+    error: str | None = None

@@ -1,0 +1,263 @@
+from __future__ import annotations
+
+import json
+from uuid import uuid4
+
+import redis
+from psycopg import Connection
+from psycopg.types.json import Json
+
+from coordinator.clock import iso, utcnow
+from coordinator.config import Settings
+from coordinator.errors import ApiError
+
+PREP_QUEUE = "prep"
+CONVERT_QUEUE = "convert"
+FAILED_QUEUE = "failed"
+
+PREP_TRANSITIONS = {
+    "submitted": {"in_progress", "cancelled"},
+    "in_progress": {"prep_complete", "failed", "cancelled"},
+    "prep_complete": {"converting", "cancelled"},
+    "converting": {"complete", "convert_failed", "cancelled"},
+    "failed": set(),
+    "convert_failed": set(),
+    "complete": set(),
+    "cancelled": set(),
+}
+
+
+def _load_job(conn: Connection, job_id) -> dict:
+    row = conn.execute("SELECT * FROM jobs WHERE job_id = %s", (job_id,)).fetchone()
+    if row is None:
+        raise ApiError(404, "job_not_found", f"job '{job_id}' not found")
+    return row
+
+
+def _public(row: dict) -> dict:
+    return {
+        "job_id": str(row["job_id"]),
+        "type": row["type"],
+        "status": row["status"],
+        "input_format": row["input_format"],
+        "input_url": row["input_url"],
+        "package_url": row["package_url"],
+        "output_url": row["output_url"],
+        "metadata": row["metadata"],
+        "prep": row["prep"],
+        "convert": row["convert"],
+        "progress": row["progress"],
+        "error": row["error"],
+        "retry_count": row["retry_count"],
+        "created_at": iso(row["created_at"]),
+        "updated_at": iso(row["updated_at"]),
+    }
+
+
+def submit_job(conn: Connection, body: dict, settings: Settings, redis_client: redis.Redis) -> dict:
+    job_type = body.get("type")
+    if job_type not in ("prep", "convert"):
+        raise ApiError(400, "invalid_request", "type must be prep or convert")
+    if job_type == "prep" and not body.get("input_url"):
+        raise ApiError(400, "invalid_request", "input_url is required for prep jobs")
+    job_id = uuid4()
+    now = utcnow()
+    conn.execute(
+        """
+        INSERT INTO jobs (
+            job_id, type, status, input_format, input_url, metadata,
+            prep, convert, progress, error, retry_count, created_at, updated_at
+        )
+        VALUES (%s, %s, 'submitted', %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+        """,
+        (
+            job_id,
+            job_type,
+            body.get("input_format"),
+            body.get("input_url"),
+            Json(body.get("metadata") or {}),
+            Json({}),
+            Json({}),
+            Json({}),
+            None,
+            now,
+            now,
+        ),
+    )
+    queue = PREP_QUEUE if job_type == "prep" else CONVERT_QUEUE
+    message = {
+        "job_id": str(job_id),
+        "type": job_type,
+        "input_format": body.get("input_format"),
+        "input_url": body.get("input_url"),
+        "output_prefix": f"s3://bucket/packages/{job_id}/",
+        "metadata": body.get("metadata") or {},
+        "created_at": iso(now),
+    }
+    redis_client.rpush(queue, json.dumps(message))
+    return {"job_id": str(job_id), "status": "submitted", "created_at": iso(now)}
+
+
+def get_job(conn: Connection, job_id) -> dict:
+    row = _load_job(conn, job_id)
+    return _public(row)
+
+
+def list_jobs(conn: Connection, status: str | None, limit: int, offset: int, customer_id: str | None) -> dict:
+    clauses = []
+    args: list = []
+    if status:
+        clauses.append("status = %s")
+        args.append(status)
+    if customer_id:
+        clauses.append("metadata->>'customer_id' = %s")
+        args.append(customer_id)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    total_row = conn.execute(f"SELECT count(*) AS n FROM jobs {where}", args).fetchone()
+    rows = conn.execute(
+        f"SELECT * FROM jobs {where} ORDER BY created_at DESC LIMIT %s OFFSET %s",
+        args + [limit, offset],
+    ).fetchall()
+    return {"jobs": [_public(row) for row in rows], "total": int(total_row["n"]), "limit": limit, "offset": offset}
+
+
+def report_progress(conn: Connection, job_id, body: dict, node_id: str | None) -> dict:
+    row = _load_job(conn, job_id)
+    if row["status"] not in ("in_progress", "converting"):
+        raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
+    now = utcnow()
+    conn.execute(
+        "UPDATE jobs SET progress = %s, updated_at = %s WHERE job_id = %s",
+        (Json(body), now, job_id),
+    )
+    return {"status": "ok"}
+
+
+def mark_in_progress(conn: Connection, job_id, worker_id: str, stage: str) -> dict:
+    row = _load_job(conn, job_id)
+    if stage == "prep":
+        if row["status"] != "submitted":
+            raise ApiError(409, "invalid_state", "job is not submitted", {"status": row["status"]})
+        new_status = "in_progress"
+        phase = "prep"
+    else:
+        if row["status"] != "prep_complete":
+            raise ApiError(409, "invalid_state", "job is not prep_complete", {"status": row["status"]})
+        new_status = "converting"
+        phase = "convert"
+    now = utcnow()
+    phase_data = row[phase] or {}
+    phase_data["worker_id"] = worker_id
+    phase_data["started_at"] = iso(now)
+    conn.execute(
+        "UPDATE jobs SET status = %s, %s = %s, updated_at = %s WHERE job_id = %s",
+        (new_status, phase, Json(phase_data), now, job_id),
+    )
+    return {"status": "ok"}
+
+
+def complete_job(conn: Connection, job_id, body: dict, worker_id: str) -> dict:
+    row = _load_job(conn, job_id)
+    now = utcnow()
+    if row["status"] in ("submitted", "in_progress"):
+        new_status = "prep_complete"
+        phase_data = row["prep"] or {}
+        phase_data["worker_id"] = worker_id
+        phase_data["completed_at"] = iso(now)
+        if body.get("total_pages") is not None:
+            phase_data["total_pages"] = body["total_pages"]
+        if body.get("kept_pages") is not None:
+            phase_data["kept_pages"] = body["kept_pages"]
+        if body.get("skipped_pages") is not None:
+            phase_data["skipped_pages"] = body["skipped_pages"]
+        package_url = body.get("package_url")
+        conn.execute(
+            "UPDATE jobs SET status = %s, package_url = %s, prep = %s, updated_at = %s WHERE job_id = %s",
+            (new_status, package_url, Json(phase_data), now, job_id),
+        )
+    elif row["status"] == "converting":
+        new_status = "complete"
+        phase_data = row["convert"] or {}
+        phase_data["worker_id"] = worker_id
+        phase_data["completed_at"] = iso(now)
+        output_url = body.get("output_url")
+        conn.execute(
+            "UPDATE jobs SET status = %s, output_url = %s, convert = %s, updated_at = %s WHERE job_id = %s",
+            (new_status, output_url, Json(phase_data), now, job_id),
+        )
+    else:
+        raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
+    return {"job_id": str(job_id), "status": new_status}
+
+
+def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client: redis.Redis, settings: Settings) -> dict:
+    row = _load_job(conn, job_id)
+    now = utcnow()
+    error = body.get("error") or "unknown error"
+    retry_count = row["retry_count"] + 1
+    max_retries = int(settings.raw.get("job", {}).get("max_retries") or 3)
+    if row["status"] == "in_progress":
+        if retry_count >= max_retries:
+            new_status = "failed"
+            redis_client.rpush(FAILED_QUEUE, json.dumps({"job_id": str(job_id), "error": error, "retry_count": retry_count}))
+        else:
+            new_status = "submitted"
+            message = {
+                "job_id": str(job_id),
+                "type": "prep",
+                "input_format": row["input_format"],
+                "input_url": row["input_url"],
+                "output_prefix": f"s3://bucket/packages/{job_id}/",
+                "metadata": row["metadata"] or {},
+                "created_at": iso(row["created_at"]),
+            }
+            redis_client.rpush(PREP_QUEUE, json.dumps(message))
+    elif row["status"] == "converting":
+        if retry_count >= max_retries:
+            new_status = "convert_failed"
+            redis_client.rpush(FAILED_QUEUE, json.dumps({"job_id": str(job_id), "error": error, "retry_count": retry_count}))
+        else:
+            new_status = "prep_complete"
+            message = {
+                "job_id": str(job_id),
+                "type": "convert",
+                "package_url": row["package_url"],
+                "output_prefix": f"s3://bucket/audio/{job_id}/",
+                "voice_recipe": (row["convert"] or {}).get("voice_recipe"),
+                "performance_style": (row["convert"] or {}).get("performance_style"),
+                "created_at": iso(row["created_at"]),
+            }
+            redis_client.rpush(CONVERT_QUEUE, json.dumps(message))
+    else:
+        raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
+    phase = "prep" if row["status"] in ("submitted", "in_progress") else "convert"
+    phase_data = row[phase] or {}
+    phase_data["worker_id"] = worker_id
+    if phase == "prep":
+        conn.execute(
+            "UPDATE jobs SET status = %s, error = %s, retry_count = %s, prep = %s, updated_at = %s WHERE job_id = %s",
+            (new_status, error, retry_count, Json(phase_data), now, job_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET status = %s, error = %s, retry_count = %s, convert = %s, updated_at = %s WHERE job_id = %s",
+            (new_status, error, retry_count, Json(phase_data), now, job_id),
+        )
+    return {"job_id": str(job_id), "status": new_status, "retry_count": retry_count}
+
+
+def cancel_job(conn: Connection, job_id) -> dict:
+    row = _load_job(conn, job_id)
+    if row["status"] in ("failed", "convert_failed", "complete", "cancelled"):
+        raise ApiError(409, "invalid_state", "job cannot be cancelled", {"status": row["status"]})
+    now = utcnow()
+    conn.execute("UPDATE jobs SET status = 'cancelled', updated_at = %s WHERE job_id = %s", (now, job_id))
+    return {"job_id": str(job_id), "status": "cancelled"}
+
+
+def queue_depths(redis_client: redis.Redis) -> dict:
+    return {
+        "prep": redis_client.llen(PREP_QUEUE),
+        "convert": redis_client.llen(CONVERT_QUEUE),
+        "failed": redis_client.llen(FAILED_QUEUE),
+    }

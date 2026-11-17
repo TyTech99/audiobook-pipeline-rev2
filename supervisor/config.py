@@ -42,6 +42,7 @@ class SupervisorSettings:
     queues: list[str]
     working_hours: dict
     heartbeat_interval_seconds: int
+    idle_timeout_seconds: int
 
 
 def load_settings(path: str | Path) -> SupervisorSettings:
@@ -85,4 +86,5 @@ def load_settings(path: str | Path) -> SupervisorSettings:
             "timezone": hours.get("timezone"),
         },
         heartbeat_interval_seconds=int((data.get("heartbeat") or {}).get("interval_seconds") or 30),
+        idle_timeout_seconds=int((data.get("idle") or {}).get("timeout_minutes", 5) * 60),
     )

@@ -45,4 +45,25 @@ CREATE TABLE IF NOT EXISTS workers (
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS jobs (
+    job_id uuid PRIMARY KEY,
+    type text NOT NULL,
+    status text NOT NULL,
+    input_format text,
+    input_url text,
+    package_url text,
+    output_url text,
+    metadata jsonb,
+    prep jsonb,
+    convert jsonb,
+    progress jsonb,
+    error text,
+    retry_count integer NOT NULL DEFAULT 0,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS jobs_status_idx ON jobs (status);
+CREATE INDEX IF NOT EXISTS jobs_created_at_idx ON jobs (created_at DESC);
+
 INSERT INTO schema_version (version) VALUES (1) ON CONFLICT DO NOTHING;

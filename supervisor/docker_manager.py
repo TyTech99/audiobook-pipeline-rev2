@@ -15,6 +15,12 @@ class ProbeRunner:
     def run(self, name: str, image: str, env: dict, timeout: int) -> int:
         raise NotImplementedError
 
+    def start_worker(self, name: str, image: str, env: dict, gpu: bool) -> None:
+        raise NotImplementedError
+
+    def stop_worker(self, name: str) -> None:
+        raise NotImplementedError
+
 
 class DockerProbeRunner(ProbeRunner):
     def __init__(self):
@@ -54,6 +60,31 @@ class DockerProbeRunner(ProbeRunner):
                 pass
         return code
 
+    def start_worker(self, name: str, image: str, env: dict, gpu: bool) -> None:
+        try:
+            existing = self.client.containers.get(name)
+            existing.remove(force=True)
+        except Exception:
+            pass
+        kwargs = {
+            "image": image,
+            "name": name,
+            "detach": True,
+            "environment": env,
+            "restart_policy": {"Name": "no"},
+        }
+        if gpu:
+            kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
+        self.client.containers.run(**kwargs)
+
+    def stop_worker(self, name: str) -> None:
+        try:
+            container = self.client.containers.get(name)
+            container.stop(timeout=30)
+            container.remove(force=True)
+        except Exception:
+            pass
+
 
 class DockerManager:
     def __init__(self, settings: SupervisorSettings, runner: ProbeRunner, client: CoordinatorClient):
@@ -61,6 +92,8 @@ class DockerManager:
         self.runner = runner
         self.client = client
         self.started: list[str] = []
+        self.worker_started_at: dict[str, float] = {}
+        self.last_queue_depth: dict[str, int] = {}
 
     def start_probe(self, probe_id: str, worker_type: str) -> None:
         name = f"audiobook-probe-{probe_id}"
@@ -87,3 +120,52 @@ class DockerManager:
         code = self.runner.run(name, self.settings.probe_image, env, timeout=60)
         if code != 0:
             self.client.fail_probe(probe_id, f"probe container exited {code}")
+
+    def start_worker(self, worker_type: str) -> None:
+        name = f"audiobook-worker-{worker_type}"
+        if self.runner.running(name):
+            return
+        image = self.settings.prep_image if worker_type == "prep" else self.settings.tts_image
+        if not image:
+            return
+        env = {
+            "NODE_ID": self.settings.node_id,
+            "WORKER_TYPE": worker_type,
+            "API_KEY": self.settings.api_key,
+            "COORDINATOR_URL": self.settings.coordinator_url,
+            "COORDINATOR_ID": self.settings.coordinator_id,
+            "REDIS_HOST": self.settings.redis_host,
+            "REDIS_PORT": str(self.settings.redis_port),
+            "REDIS_PASSWORD": self.settings.redis_password,
+            "S3_ENDPOINT": self.settings.s3_endpoint,
+            "S3_BUCKET": self.settings.s3_bucket,
+            "S3_ACCESS_KEY": self.settings.s3_access_key,
+            "S3_SECRET_KEY": self.settings.s3_secret_key,
+        }
+        gpu = worker_type == "tts"
+        self.runner.start_worker(name, image, env, gpu)
+        import time
+
+        self.worker_started_at[name] = time.time()
+
+    def stop_worker(self, worker_type: str) -> None:
+        name = f"audiobook-worker-{worker_type}"
+        self.runner.stop_worker(name)
+        self.worker_started_at.pop(name, None)
+
+    def check_idle(self, queue_depths: dict[str, int], now: float | None = None) -> None:
+        import time
+
+        now = now if now is not None else time.time()
+        self.last_queue_depth = queue_depths
+        for worker_type in ("prep", "tts"):
+            name = f"audiobook-worker-{worker_type}"
+            if not self.runner.running(name):
+                continue
+            queue = "prep" if worker_type == "prep" else "convert"
+            depth = queue_depths.get(queue, 0)
+            if depth > 0:
+                continue
+            started = self.worker_started_at.get(name, now)
+            if now - started >= self.settings.idle_timeout_seconds:
+                self.stop_worker(worker_type)

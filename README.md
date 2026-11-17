@@ -311,7 +311,7 @@ queues:
 
 ## Status
 
-**Phase: Commissioning slice**
+**Phase: Core pipeline**
 
 - [x] Architecture design
 - [x] Data model definitions
@@ -319,10 +319,10 @@ queues:
 - [x] Coordinator commissioning API
 - [x] Supervisor registration and probe loop
 - [x] `audiobookctl` install, apply, update, uninstall
-- [ ] Prep worker implementation
-- [ ] TTS worker implementation
-- [ ] JIT start and stop of real prep and TTS images
-- [ ] End-to-end job testing
+- [x] Prep worker implementation
+- [x] TTS worker implementation
+- [x] JIT start and stop of real prep and TTS images
+- [x] End-to-end job testing
 
 ## Contributing
 

@@ -81,7 +81,7 @@ def heartbeat(
     _: Principal = Depends(require_node_path),
     conn: Connection = Depends(get_conn),
 ):
-    return node_service.heartbeat(conn, node_id, _settings(request))
+    return node_service.heartbeat(conn, node_id, _settings(request), request.app.state.redis)
 
 
 @router.post("/{node_id}/probe")

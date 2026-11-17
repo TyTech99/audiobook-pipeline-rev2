@@ -167,7 +167,7 @@ def register(conn: Connection, node_id: str, body: dict, settings: Settings) -> 
     return {"node_id": node_id, "state": new_state, "effective_queues": effective}
 
 
-def heartbeat(conn: Connection, node_id: str, settings: Settings) -> dict:
+def heartbeat(conn: Connection, node_id: str, settings: Settings, redis_client=None) -> dict:
     row = _load(conn, node_id, settings)
     if row["state"] in {"pending", "decommissioned"}:
         raise ApiError(409, "invalid_state", "node cannot heartbeat in this state", {"state": row["state"]})
@@ -199,6 +199,12 @@ def heartbeat(conn: Connection, node_id: str, settings: Settings) -> dict:
         if probe:
             command = "start_probe"
             extra = {"probe_id": str(probe["probe_id"]), "worker_type": probe["worker_type"]}
+    if redis_client is not None:
+        from coordinator.services.jobs import queue_depths
+
+        extra["queue_depths"] = queue_depths(redis_client)
+    else:
+        extra["queue_depths"] = {"prep": 0, "convert": 0, "failed": 0}
     return {
         "status": "ok",
         "server_time": iso(now),

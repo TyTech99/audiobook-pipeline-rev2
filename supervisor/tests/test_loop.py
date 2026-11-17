@@ -30,6 +30,7 @@ def settings(**overrides) -> SupervisorSettings:
         queues=["prep"],
         working_hours={"enabled": False, "start": "22:00", "end": "08:00", "timezone": "UTC"},
         heartbeat_interval_seconds=30,
+        idle_timeout_seconds=300,
     )
     base.update(overrides)
     return SupervisorSettings(**base)

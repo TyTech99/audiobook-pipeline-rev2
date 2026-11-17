@@ -12,7 +12,7 @@ from coordinator.config import Settings, load_settings
 from coordinator.db.postgres import apply_schema, make_pool
 from coordinator.errors import ApiError
 from coordinator.logging_setup import setup_logging
-from coordinator.routers import health, nodes, workers
+from coordinator.routers import health, jobs, nodes, workers
 from coordinator.services.rules import hash_key as hash_key_fn
 
 
@@ -45,6 +45,7 @@ def create_app(settings: Settings) -> FastAPI:
     app.include_router(health.router)
     app.include_router(nodes.router, prefix="/api/v1/nodes")
     app.include_router(workers.router, prefix="/api/v1/workers")
+    app.include_router(jobs.router, prefix="/api/v1/jobs")
 
     @app.exception_handler(ApiError)
     def api_error(_request: Request, exc: ApiError):
