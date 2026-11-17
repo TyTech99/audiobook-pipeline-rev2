@@ -87,29 +87,107 @@ A system that converts PDFs and EPUBs into audiobooks using a distributed worker
 
 ## Setup
 
-Run `audiobookctl` from a checkout of this repo. Linux is Debian or Ubuntu, as root. Windows can install a node only. Python 3 is already installed. The CLI installs Docker. It does not install an NVIDIA driver. Prep and TTS do not process jobs yet. A node install starts the supervisor.
+### Prerequisites
 
-Copy a file from `deploy/examples/` and pass it as `--state`. The operator key and Redis password land in `/etc/audiobook/coordinator.env`. The CLI reads `redis_bind` from the state file and binds the copied compose file to that address. Port, TLS, and accept rules are in `docs/architecture/commissioning.md`.
+Every host you install needs:
+
+- **OS**: Debian or Ubuntu for the coordinator and Linux nodes. Windows can run a node only.
+- **User**: root on Linux, an Administrator on Windows.
+- **Python 3**: already installed. The CLI uses it and does not install it.
+- **Docker**: the CLI installs it when it is missing.
+- **NVIDIA driver**: install it yourself on any host that should run convert jobs. The CLI checks `nvidia-smi` and exits when it fails. It does not install the driver.
+- **Network**: the coordinator and nodes must reach each other. Redis is not reachable off the coordinator host unless you change `redis_bind`.
+
+### How the CLI works
+
+You run the same CLI, `audiobookctl`, from a checkout of this repo on every host. You invoke it as `python3 -m cli` on Linux and `python -m cli` on Windows. The subcommand you choose selects the workload:
+
+| Subcommand | What it installs | Where you run it |
+| --- | --- | --- |
+| `standalone install` | The coordinator and one local node on the same host | A single Linux machine |
+| `coordinator install` | The coordinator: Redis, PostgreSQL, and the API | The coordinator host, Linux |
+| `node invite` | Creates a node record on the coordinator and prints a one-time key | Any machine that can reach the coordinator API |
+| `node install` | The supervisor container that manages worker containers | A node host, Linux or Windows |
+
+Each install reads a state file from `deploy/examples/`. Copy the example that matches your workload, edit the addresses and queues, and pass the file as `--state`. The CLI generates the operator key and Redis password when you leave them empty, and writes them to `/etc/audiobook/coordinator.env`. The CLI reads `redis_bind` from the state file and binds the copied compose file to that address.
+
+Prep and TTS workers do not process jobs yet. A node install starts the supervisor, which is the process that will start worker containers when they are ready.
 
 ### Single Linux machine
 
-One host runs the coordinator and node `local` on `127.0.0.1`. Remove `convert` from `queues` in the state file when `nvidia-smi` fails.
+Use this when one Debian or Ubuntu host runs the coordinator and the only node. Nothing else on the network needs to reach Redis or the API.
+
+1. Copy the example state file.
 
 ```bash
-sudo PYTHONPATH=. python3 -m cli standalone install --state deploy/examples/standalone.example.yaml
+sudo cp deploy/examples/standalone.example.yaml /etc/audiobook/standalone.yaml
+```
+
+2. If this machine should take convert jobs, check the GPU.
+
+```bash
+nvidia-smi
+```
+
+If that command fails, edit `queues` in the state file so the only entry is `prep`.
+
+3. Install.
+
+```bash
+sudo PYTHONPATH=. python3 -m cli standalone install --state /etc/audiobook/standalone.yaml
+```
+
+A finished run prints `coordinator installed` and `node installed`. If the coordinator container is still starting, the invite can fail. Run the same command again. The second run prints `coordinator unchanged` and retries the node.
+
+4. Read the operator key. It is not printed by the installer.
+
+```bash
+sudo awk -F= '/^API_KEY_OPERATOR=/ {print $2}' /etc/audiobook/coordinator.env
+```
+
+5. Confirm the containers. The supervisor service builds its image on first start, so that start is the slow one.
+
+```bash
+sudo docker compose -f /opt/audiobook/coordinator/docker-compose.dev.yml ps
+sudo systemctl status audiobook-supervisor.service --no-pager
+sudo docker ps --filter name=audiobook-supervisor
 ```
 
 ### Coordinator, Linux
 
-Set `api_url`, `redis_bind`, and `redis_advertise` in the state file to this host's private IP when other machines must connect. The CLI binds the copied compose file to `redis_bind`.
+Use this when other machines will register as nodes.
+
+1. Copy the example state file.
 
 ```bash
-sudo PYTHONPATH=. python3 -m cli coordinator install --state deploy/examples/coordinator.example.yaml
+sudo cp deploy/examples/coordinator.example.yaml /etc/audiobook/coordinator.yaml
+```
+
+2. Set `api_url`, `redis_bind`, and `redis_advertise` to this host's private IP. The CLI binds the copied compose file to `redis_bind`.
+
+3. Install.
+
+```bash
+sudo PYTHONPATH=. python3 -m cli coordinator install --state /etc/audiobook/coordinator.yaml
+```
+
+4. Read both secrets from `/etc/audiobook/coordinator.env`. Nodes need `API_KEY_OPERATOR` and `REDIS_PASSWORD`.
+
+```bash
+sudo awk -F= '/^(API_KEY_OPERATOR|REDIS_PASSWORD)=/ {print}' /etc/audiobook/coordinator.env
 ```
 
 ### Prep node
 
-Invite on the coordinator. `--json` prints `node_api_key`. Pass `--redis-password` to include it in the JSON. Put that key, `queues: [prep]`, and the Redis password in a copy of `deploy/examples/node.example.yaml`.
+Use this when a host should join an existing coordinator and take prep jobs. No GPU is required.
+
+1. On the coordinator, read the operator key and Redis password.
+
+```bash
+sudo awk -F= '/^(API_KEY_OPERATOR|REDIS_PASSWORD)=/ {print}' /etc/audiobook/coordinator.env
+```
+
+2. Invite the node. Run this from any machine that can reach the coordinator API. `--json` prints the one-time node key.
 
 ```bash
 sudo PYTHONPATH=. python3 -m cli node invite \
@@ -119,23 +197,68 @@ sudo PYTHONPATH=. python3 -m cli node invite \
   --redis-host 10.0.0.5 --redis-password "$REDIS_PASSWORD" --json
 ```
 
-Linux:
+3. On the node, copy the example state file.
 
 ```bash
-sudo PYTHONPATH=. python3 -m cli node install --state deploy/examples/node.example.yaml
+sudo cp deploy/examples/node.example.yaml /etc/audiobook/node.yaml
 ```
 
-Windows, from an Administrator prompt. Build the image first. The scheduled task does not. Exit code 4 means reboot and run the install again.
+4. Set these fields in the state file:
 
-```powershell
-docker build -t audiobook-supervisor:local -f deploy/supervisor.Dockerfile .
-$env:PYTHONPATH = "."
-python -m cli node install --state C:\ProgramData\audiobook\node.yaml
+   - `node_id` to the id you invited
+   - `queues` to `prep` only
+   - `coordinator_url` to the same URL you passed to invite
+   - `coordinator_id` and `node_api_key` from the invite JSON
+   - `operator_api_key` to `API_KEY_OPERATOR`, so a later uninstall can drain the node
+   - `redis.host` to the coordinator's private IP
+   - `redis.password` to `REDIS_PASSWORD`
+
+5. Install as root.
+
+```bash
+sudo PYTHONPATH=. python3 -m cli node install --state /etc/audiobook/node.yaml
+```
+
+This installs `docker-ce` if it is missing, writes `/etc/audiobook/node.env`, and installs `audiobook-supervisor.service`. The service writes `/etc/audiobook/hardware.json` from `nvidia-smi` when the driver is present, builds the supervisor image, and runs that container with `/var/run/docker.sock` mounted.
+
+6. Confirm the supervisor is running.
+
+```bash
+sudo systemctl status audiobook-supervisor.service --no-pager
+sudo docker ps --filter name=audiobook-supervisor
 ```
 
 ### Convert node
 
-Same commands as a prep node. `nvidia-smi` must already succeed. Use `--queues convert`. Linux also installs `nvidia-container-toolkit`. On Windows, after install, set `gpu` in `C:\ProgramData\audiobook\hardware.json`. The installer writes `gpu` as null.
+Do everything in the prep section, with these differences.
+
+- Install the NVIDIA driver before the CLI. `nvidia-smi` must print the GPU.
+- Invite with `--queues convert`, or `--queues prep,convert` when the same machine does both. Set `queues` in the state file to match.
+- On Linux, the package list adds `nvidia-container-toolkit`.
+- On Windows, after install, set `gpu` in `C:\ProgramData\audiobook\hardware.json`. The installer writes `gpu` as null.
+
+### Windows node
+
+Windows can run a node only. Open PowerShell as Administrator and run the CLI from the checkout.
+
+1. Build the supervisor image. The scheduled task does not build it.
+
+```powershell
+docker build -t audiobook-supervisor:local -f deploy/supervisor.Dockerfile .
+```
+
+2. Copy the example state file to `C:\ProgramData\audiobook\node.yaml` and set the same fields as on Linux.
+
+3. Install.
+
+```powershell
+$env:PYTHONPATH = "."
+python -m cli node install --state C:\ProgramData\audiobook\node.yaml
+```
+
+Exit code 4 means Docker Desktop was installed and Windows wants a reboot. Reboot, then run the same install again.
+
+The task name is `AudiobookSupervisor`. It runs at startup as SYSTEM. Start Docker Desktop before you run the task, or the container exits.
 
 ## Tests
 
