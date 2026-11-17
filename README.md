@@ -111,6 +111,8 @@ You run the same CLI, `audiobookctl`, from a checkout of this repo on every host
 
 Each install reads a state file from `deploy/examples/`. Copy the example that matches your workload, edit the addresses and queues, and pass the file as `--state`. The CLI generates the operator key and Redis password when you leave them empty, and writes them to `/etc/audiobook/coordinator.env`. The CLI reads `redis_bind` from the state file and binds the copied compose file to that address.
 
+For the full install procedures and what each state file field means, see [`deploy/README.md`](deploy/README.md). The example files carry comments above each field.
+
 Prep and TTS workers do not process jobs yet. A node install starts the supervisor, which is the process that will start worker containers when they are ready.
 
 ### Single Linux machine

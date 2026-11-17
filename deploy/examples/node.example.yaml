@@ -1,19 +1,60 @@
+# State file for `audiobookctl node install`.
+# Copy this file, fill in the fields below, and pass it as --state.
+#
+# Before you install, you must invite this node from the coordinator:
+#   audiobookctl node invite --coordinator-url ... --operator-api-key ... \
+#     --node-id <id> --queues <queues> --redis-host <ip> --redis-password <pw> --json
+# The invite prints node_api_key and coordinator_id once. Write both
+# into this file before you run node install.
+#
+# Field reference: see the comments below each field.
+
 role: node
+
+# The ID you passed to `node invite`. Must match exactly.
 node_id: gpu-study
+
+# Free text. Shows in the node list.
 display_name: study GPU box
+
+# The same URL you passed to `node invite`.
 coordinator_url: https://coordinator.example:8000/api/v1
+
+# The coordinator_id from the invite JSON. Must match the coordinator's
+# COORDINATOR_ID. The CLI checks this at install and refuses to register
+# if it does not match.
 coordinator_id: ""
+
+# Path to a CA bundle when coordinator_url is HTTPS with a private CA.
+# Leave empty for public certificates or HTTP.
 coordinator_ca_file: ""
+
+# The queues this node is allowed to serve. Must match what you passed
+# to `node invite` with --queues.
 queues:
   - convert
+
+# When the node is allowed to run jobs.
 working_hours:
   enabled: true
   start: "22:00"
   end: "08:00"
   timezone: America/New_York
+
+# The node_api_key from the invite JSON. Shown once. The CLI writes it
+# to API_KEY in /etc/audiobook/node.env.
 node_api_key: ""
+
+# The operator API key from the coordinator's coordinator.env.
+# The CLI writes it to OPERATOR_API_KEY in node.env.
+# Needed so a later uninstall can drain the node on the coordinator.
 operator_api_key: ""
+
+# The image the supervisor uses for probe containers.
 probe_image: audiobook-probe:dev
+
+# Redis connection. The host must be reachable from this node.
+# The password must match REDIS_PASSWORD on the coordinator.
 redis:
   host: 10.0.0.5
   port: 6379

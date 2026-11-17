@@ -1,19 +1,45 @@
+# State file for `audiobookctl standalone install`.
+# Installs the coordinator and one local node on the same host.
+# The CLI runs coordinator install, then invites the local node,
+# then runs node install. You do not run node invite yourself.
+#
+# Copy this file, edit the fields below, and pass it as --state.
+#
+# Field reference: see the comments below each field.
+
 role: standalone
+
+# The node ID for the local node. The CLI invites it automatically.
 node_id: local
+
+# Leave empty to let the CLI generate the coordinator ID.
 coordinator_id: ""
+
+# The coordinator URL. Leave at 127.0.0.1 for a single machine.
 api_url: http://127.0.0.1:8000/api/v1
+
+# Redis binds to localhost only. Nothing off this machine can reach it.
 redis_bind: 127.0.0.1
 redis_advertise: 127.0.0.1
+
+# S3 endpoint. Leave empty until you have one.
 s3_endpoint: ""
+
+# Leave empty to let the CLI generate the operator API key.
 operator_api_key: ""
-tls:
-  mode: off
+
+# Queues the local node serves. Use [prep] when the machine has no GPU.
+# Use [prep, convert] when it has a GPU and you want both.
 queues:
   - prep
   - convert
+
+# When the local node is allowed to run jobs.
 working_hours:
   enabled: false
   start: "00:00"
   end: "23:59"
   timezone: UTC
+
+# The image the supervisor uses for probe containers.
 probe_image: audiobook-probe:dev

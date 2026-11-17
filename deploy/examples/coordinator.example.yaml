@@ -1,9 +1,50 @@
+# State file for `audiobookctl coordinator install`.
+# Copy this file, edit the fields marked "set this", and pass it as --state.
+# The CLI generates secrets when a field is empty. It writes them to
+# /etc/audiobook/coordinator.env and does not print them.
+#
+# Field reference: see the comments below each field.
+
 role: coordinator
+
+# Leave empty to let the CLI generate an ID. The CLI writes it to
+# COORDINATOR_ID in coordinator.env. Every node state file must carry
+# the same value in its coordinator_id field.
 coordinator_id: ""
+
+# The URL nodes and operators use to reach this coordinator.
+# Set this to this host's private IP or internal hostname.
+# Example: http://10.0.0.5:8000/api/v1
 api_url: http://10.0.0.5:8000/api/v1
+
+# The address Redis binds to inside the compose project.
+# Set this to the same private IP as api_url.
+# Nodes connect to Redis at this address.
 redis_bind: 10.0.0.5
+
+# The address Redis reports to clients. Defaults to redis_bind.
+# Set this when the address nodes use to reach Redis differs from
+# the bind address.
 redis_advertise: 10.0.0.5
+
+# S3 endpoint for book packages and audio output.
+# Leave empty until you have an S3-compatible endpoint.
 s3_endpoint: ""
+
+# Leave empty to let the CLI generate the operator API key.
+# The CLI writes it to API_KEY_OPERATOR in coordinator.env.
+# You need this key to invite nodes, submit jobs, and drain nodes.
 operator_api_key: ""
+
+# Leave empty to let the CLI generate the Redis password.
+# The CLI writes it to REDIS_PASSWORD in coordinator.env.
+# Every node state file must carry the same value in redis.password.
+redis_password: ""
+
+# Leave empty to let the CLI generate the Postgres password.
+# The CLI writes it to POSTGRES_PASSWORD in coordinator.env.
+postgres_password: ""
+
 tls:
+  # off for the dev stand. Any other layout uses HTTPS in front of port 8000.
   mode: off
