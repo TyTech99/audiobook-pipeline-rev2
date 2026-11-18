@@ -17,8 +17,10 @@ from coordinator.errors import ApiError
 def _storage_root() -> str:
     return os.environ.get("STORAGE_ROOT", "/var/lib/audiobook")
 
-PREP_QUEUE = "prep"
-CONVERT_QUEUE = "convert"
+PREP_QUEUE = "prep:pending"
+CONVERT_QUEUE = "convert:pending"
+PREP_PROCESSING = "prep:processing"
+CONVERT_PROCESSING = "convert:processing"
 FAILED_QUEUE = "failed"
 
 PREP_TRANSITIONS = {
@@ -303,5 +305,7 @@ def queue_depths(redis_client: redis.Redis) -> dict:
     return {
         "prep": redis_client.llen(PREP_QUEUE),
         "convert": redis_client.llen(CONVERT_QUEUE),
+        "prep_processing": redis_client.llen(PREP_PROCESSING),
+        "convert_processing": redis_client.llen(CONVERT_PROCESSING),
         "failed": redis_client.llen(FAILED_QUEUE),
     }

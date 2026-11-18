@@ -32,8 +32,8 @@ auth:
     - "${API_KEY_OPERATOR}"
 
 queues:
-  prep: "prep"
-  convert: "convert"
+  prep: "prep:pending"
+  convert: "convert:pending"
   failed: "failed"
 
 job:

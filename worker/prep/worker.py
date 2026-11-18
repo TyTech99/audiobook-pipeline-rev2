@@ -96,11 +96,30 @@ class PrepWorker:
             logger.warning("Failed to report progress for %s: %s", job_id, e)
 
     def claim_job(self, timeout: int = 30) -> dict | None:
-        result = self.redis.brpop(["prep"], timeout=timeout)
+        result = self.redis.blmove(
+            "prep:pending", "prep:processing",
+            timeout=timeout,
+            src="RIGHT", dest="LEFT"
+        )
         if result is None:
             return None
-        _, raw = result
-        return json.loads(raw)
+        job = json.loads(result)
+        job_id = job.get("job_id")
+        # Record claim time for the reaper
+        self.redis.hset("job:claims", job_id, time.time())
+        return job
+
+    def ack_job(self, job: dict) -> None:
+        """Remove job from processing queue after successful completion."""
+        job_id = job.get("job_id")
+        self.redis.lrem("prep:processing", 1, json.dumps(job, sort_keys=True))
+        self.redis.hdel("job:claims", job_id)
+
+    def nack_job(self, job: dict, error: str) -> None:
+        """Remove job from processing queue after failure."""
+        job_id = job.get("job_id")
+        self.redis.lrem("prep:processing", 1, json.dumps(job, sort_keys=True))
+        self.redis.hdel("job:claims", job_id)
 
     def process_job(self, job: dict) -> dict:
         job_id = job["job_id"]
@@ -284,17 +303,27 @@ class PrepWorker:
             jobs_processed += 1
             try:
                 job_id = job["job_id"]
-                # Fetch full job details from coordinator (queue only has job_id + type)
-                response = self.http.get(
-                    f"{self.coordinator_url}/jobs/{job_id}",
-                    headers=self._headers(),
-                    timeout=10,
-                )
-                response.raise_for_status()
-                job = response.json()
+                # Check if job is already complete (idempotency for at-least-once delivery)
+                try:
+                    response = self.http.get(
+                        f"{self.coordinator_url}/jobs/{job_id}",
+                        headers=self._headers(),
+                        timeout=10,
+                    )
+                    response.raise_for_status()
+                    job_data = response.json()
+                    if job_data["status"] in ("prep_complete", "complete", "cancelled"):
+                        logger.info("Job %s already %s, skipping", job_id, job_data["status"])
+                        self.ack_job(job)
+                        continue
+                    job = job_data
+                except Exception as e:
+                    logger.warning("Could not check job status: %s", e)
                 self.heartbeat(job_id)
                 self.process_job(job)
+                self.ack_job(job)
             except Exception as exc:
+                logger.error("Job %s failed: %s", job.get("job_id"), exc)
                 try:
                     self.http.post(
                         f"{self.coordinator_url}/jobs/{job['job_id']}/fail",
@@ -303,6 +332,7 @@ class PrepWorker:
                     )
                 except Exception:
                     pass
+                self.nack_job(job, str(exc))
         self.http.delete(f"{self.coordinator_url}/workers/{self.worker_id}", headers=self._headers())
 
 

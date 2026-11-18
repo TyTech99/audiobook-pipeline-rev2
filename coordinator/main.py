@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -13,7 +15,10 @@ from coordinator.db.postgres import apply_schema, make_pool
 from coordinator.errors import ApiError
 from coordinator.logging_setup import setup_logging
 from coordinator.routers import health, jobs, nodes, workers
+from coordinator.services.reaper import run_reaper
 from coordinator.services.rules import hash_key as hash_key_fn
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings) -> FastAPI:
@@ -35,9 +40,31 @@ def create_app(settings: Settings) -> FastAPI:
         app.state.redis = client
         app.state.settings = settings
         app.state.operator_hashes = [hash_key_fn(key) for key in settings.operator_api_keys]
+
+        # Start job reaper as background task
+        visibility_timeout = int(settings.raw.get("job", {}).get("visibility_timeout_seconds") or 2700)
+        max_retries = int(settings.raw.get("job", {}).get("max_retries") or 3)
+
+        async def reaper_loop():
+            while True:
+                try:
+                    stats = run_reaper(client, visibility_timeout, max_retries)
+                    if stats["requeued"] or stats["dead_lettered"]:
+                        logger.info("Reaper: %s", stats)
+                except Exception as e:
+                    logger.error("Reaper error: %s", e)
+                await asyncio.sleep(60)
+
+        reaper_task = asyncio.create_task(reaper_loop())
+
         try:
             yield
         finally:
+            reaper_task.cancel()
+            try:
+                await reaper_task
+            except asyncio.CancelledError:
+                pass
             client.close()
             pool.close()
 

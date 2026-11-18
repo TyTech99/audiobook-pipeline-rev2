@@ -286,18 +286,32 @@ def test_prep_worker_uses_analyzer(tmp_path):
             }
 
     class FakeRedis:
-        def brpop(self, keys, timeout=30):
+        def blmove(self, src, dst, timeout=30, src_end=None, dst_end=None):
             return None
 
+        def hset(self, name, key, value):
+            return 1
+
+        def hdel(self, name, key):
+            return 1
+
+        def lrem(self, name, count, value):
+            return 0
+
     class FakeHttp:
-        def post(self, url, headers=None, json=None):
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+        def post(self, url, headers=None, json=None, timeout=None):
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
         def delete(self, url, headers=None):
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
-        def get(self, url, headers=None):
-            return type("R", (), {"status_code": 200, "content": b"", "raise_for_status": lambda: None})()
+        def get(self, url, headers=None, timeout=None):
+            return type("R", (), {
+                "status_code": 200,
+                "content": b"",
+                "raise_for_status": lambda self=None: None,
+                "json": lambda self=None: {"status": "submitted"},
+            })()
 
     pdf = make_test_pdf()
     pdf_path = tmp_path / "book.pdf"
