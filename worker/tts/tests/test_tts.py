@@ -114,20 +114,29 @@ def test_tts_worker_process_job(tmp_path):
     output_prefix.mkdir()
 
     class FakeRedis:
-        def brpop(self, keys, timeout=30):
+        def blmove(self, src, dst, timeout=30, src_end=None, dst_end=None):
             return None
+
+        def hset(self, name, key, value):
+            return 1
+
+        def hdel(self, name, key):
+            return 1
+
+        def lrem(self, name, count, value):
+            return 0
 
     class FakeHttp:
         def __init__(self):
             self.calls = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.calls.append({"url": url, "json": json})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
         def delete(self, url, headers=None):
             self.calls.append({"url": url})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
     http = FakeHttp()
     runner = StubRunner(code=0)
@@ -188,19 +197,28 @@ def test_tts_worker_fails_on_nonzero_exit(tmp_path):
     (input_dir / "script.json").write_text("{}")
 
     class FakeRedis:
-        def brpop(self, keys, timeout=30):
+        def blmove(self, src, dst, timeout=30, src_end=None, dst_end=None):
             return None
+
+        def hset(self, name, key, value):
+            return 1
+
+        def hdel(self, name, key):
+            return 1
+
+        def lrem(self, name, count, value):
+            return 0
 
     class FakeHttp:
         def __init__(self):
             self.calls = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.calls.append({"url": url, "json": json})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
         def delete(self, url, headers=None):
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
     http = FakeHttp()
     runner = StubRunner(code=1)

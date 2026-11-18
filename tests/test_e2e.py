@@ -107,7 +107,7 @@ def test_e2e_prep_job(e2e_app, clean_e2e, tmp_path):
     assert initial.json()["status"] == "submitted"
 
     redis_client = e2e_app.app.state.redis
-    assert redis_client.llen("prep") == 1
+    assert redis_client.llen("prep:pending") == 1
 
     output_dir = tmp_path / "output"
     output_dir.mkdir()
@@ -117,16 +117,21 @@ def test_e2e_prep_job(e2e_app, clean_e2e, tmp_path):
             self.base_url = base_url
             self.calls = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.calls.append({"url": url, "json": json})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
         def delete(self, url, headers=None):
             self.calls.append({"url": url})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
-        def get(self, url, headers=None):
-            return type("R", (), {"status_code": 200, "content": b"", "raise_for_status": lambda: None})()
+        def get(self, url, headers=None, timeout=None):
+            return type("R", (), {
+                "status_code": 200,
+                "content": b"",
+                "raise_for_status": lambda self=None: None,
+                "json": lambda self=None: {"status": "submitted"},
+            })()
 
     worker_settings = {
         "node_id": "e2e-node",
@@ -251,10 +256,10 @@ def test_e2e_convert_job_with_stub_runner(e2e_app, clean_e2e, tmp_path):
     job_id = response.json()["job_id"]
 
     redis_client = e2e_app.app.state.redis
-    assert redis_client.llen("convert") == 1
+    assert redis_client.llen("convert:pending") == 1
 
     # Claim the job. Convert queue messages carry package_url = input_url.
-    message = redis_client.lpop("convert")
+    message = redis_client.lpop("convert:pending")
     job = json.loads(message)
     assert job["job_id"] == job_id
     assert job["type"] == "convert"
@@ -282,21 +287,30 @@ def test_e2e_convert_job_with_stub_runner(e2e_app, clean_e2e, tmp_path):
             return 0
 
     class FakeRedis:
-        def brpop(self, keys, timeout=30):
+        def blmove(self, src, dst, timeout=30, src_end=None, dst_end=None):
             return None
+
+        def hset(self, name, key, value):
+            return 1
+
+        def hdel(self, name, key):
+            return 1
+
+        def lrem(self, name, count, value):
+            return 0
 
     class FakeHttp:
         def __init__(self, base_url):
             self.base_url = base_url
             self.calls = []
 
-        def post(self, url, headers=None, json=None):
+        def post(self, url, headers=None, json=None, timeout=None):
             self.calls.append({"url": url, "json": json})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
         def delete(self, url, headers=None):
             self.calls.append({"url": url})
-            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
 
     output_dir = tmp_path / "audio"
     output_dir.mkdir()

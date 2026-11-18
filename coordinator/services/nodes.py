@@ -204,7 +204,7 @@ def heartbeat(conn: Connection, node_id: str, settings: Settings, redis_client=N
 
         extra["queue_depths"] = queue_depths(redis_client)
     else:
-        extra["queue_depths"] = {"prep": 0, "convert": 0, "failed": 0}
+        extra["queue_depths"] = {"prep": 0, "convert": 0, "prep_processing": 0, "convert_processing": 0, "failed": 0}
     return {
         "status": "ok",
         "server_time": iso(now),
