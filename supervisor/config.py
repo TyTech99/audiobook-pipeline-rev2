@@ -7,12 +7,16 @@ from pathlib import Path
 
 import yaml
 
-_ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+_ENV = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}")
 
 
 def expand_env(value):
     if isinstance(value, str):
-        return _ENV.sub(lambda match: os.environ.get(match.group(1), ""), value)
+        def _sub(match):
+            var = match.group(1)
+            default = match.group(3)
+            return os.environ.get(var, default if default is not None else "")
+        return _ENV.sub(_sub, value)
     if isinstance(value, list):
         return [expand_env(item) for item in value]
     if isinstance(value, dict):
