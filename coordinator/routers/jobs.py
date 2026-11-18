@@ -1,6 +1,6 @@
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from psycopg import Connection
 
 from coordinator.auth import Principal, get_conn, get_principal, require_operator
@@ -15,6 +15,31 @@ def _node_principal(principal: Principal = Depends(get_principal)) -> Principal:
     if principal.key_class != "node" or not principal.node_id:
         raise ApiError(401, "unauthorized", "node key required")
     return principal
+
+
+@router.post("/upload")
+def upload_file(
+    file: UploadFile = File(...),
+    _: Principal = Depends(require_operator),
+):
+    """Upload a source document (PDF/EPUB) and get back an input_url for job submission."""
+    import os
+    import shutil
+
+    root = os.environ.get("STORAGE_ROOT", "/var/lib/audiobook")
+    input_dir = os.path.join(root, "input")
+    os.makedirs(input_dir, exist_ok=True)
+
+    # Sanitize filename and prepend a UUID to avoid collisions
+    safe_name = os.path.basename(file.filename or "upload")
+    dest_name = f"{uuid4().hex}-{safe_name}"
+    dest_path = os.path.join(input_dir, dest_name)
+
+    with open(dest_path, "wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    input_url = f"file://{dest_path}"
+    return {"input_url": input_url, "filename": safe_name, "size": os.path.getsize(dest_path)}
 
 
 @router.post("")
