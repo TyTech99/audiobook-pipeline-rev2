@@ -45,6 +45,10 @@ class LiveApi:
             },
             timeout=10,
         )
+        if response.status_code == 409:
+            # Node already exists — return a sentinel indicating no new key was issued.
+            # The caller should use the existing key from the node's env file.
+            return {"node_api_key": "__EXISTS__", "already_exists": True}
         response.raise_for_status()
         return response.json()
 

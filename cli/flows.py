@@ -401,7 +401,16 @@ def install_standalone(host, state: dict, api, messages: list[str], force: bool 
             "working_hours": node_state["working_hours"],
         },
     )
-    node_state["node_api_key"] = invited["node_api_key"]
+    if invited.get("already_exists"):
+        # Node already exists — read the existing key from the node's env file.
+        node_env = parse_env(host.read(linux_paths()["node_env"]))
+        node_state["node_api_key"] = node_env.get("API_KEY", "")
+        if not node_state["node_api_key"]:
+            messages.append("node already exists but no API key found in env file")
+            return {"code": EXIT_FAILED, "changed": False}
+        messages.append(f"node '{node_state['node_id']}' already exists, reusing existing key")
+    else:
+        node_state["node_api_key"] = invited["node_api_key"]
     # Ensure working_hours and allowed_queues match the state file even if the
     # node row already existed (e.g. coordinator reinstalled, node row persisted).
     api.patch_node(
