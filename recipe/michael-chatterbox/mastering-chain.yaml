@@ -1,0 +1,34 @@
+# Mastering chain for Michael Chatterbox recipe
+# Applied via ffmpeg after TTS generation, before packaging.
+#
+# Target: ACX-compliant loudness with safety margin.
+# - Integrated loudness: -16 LUFS (within ACX -23 to -18 range)
+# - True peak: -3.0 dBTP (below ACX -3 dB ceiling)
+# - LRA: 11 LU (moderate dynamic range for speech)
+
+chain:
+  - stage: "loudnorm"
+    filter: "loudnorm"
+    params:
+      I: -16          # Integrated loudness (LUFS)
+      TP: -3          # True peak (dBTP)
+      LRA: 11         # Loudness range (LU)
+      linear: true    # Two-pass linear normalization
+
+  - stage: "resample"
+    filter: "aresample"
+    params:
+      frequency: 44100   # ACX standard sample rate
+
+  - stage: "channels"
+    filter: "aformat"
+    params:
+      channel_layouts: "mono"   # ACX requires mono
+
+# QC thresholds (measured after mastering)
+qc:
+  target_loudness_lufs: -16.0
+  loudness_tolerance: 1.0       # ±1 LUFS
+  max_true_peak_db: -3.0
+  max_noise_floor_db: -60.0     # ACX requirement
+  min_duration_seconds: 1.0     # Reject empty chapters

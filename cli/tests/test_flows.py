@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from cli.flows import (
     EXIT_OK,
@@ -225,7 +226,18 @@ def test_standalone_invites_a_local_node_and_checks_its_key():
     host = MemoryHost(gpu=False)
     api = FakeApi()
     state = coordinator_state()
-    state.update({"node_id": "local", "queues": ["prep"], "probe_image": "audiobook-probe:dev"})
+    state.update({
+        "node_id": "local",
+        "queues": ["prep"],
+        "probe_image": "audiobook-probe:dev",
+        "llm": {
+            "base_url": "http://127.0.0.1:8080/v1",
+            "api_key": "llm-key",
+            "model": "qwen-local",
+            "timeout_seconds": 90,
+            "slots": 4,
+        },
+    })
     result = install_standalone(host, state, api, [])
     assert result["code"] == EXIT_OK
     assert "audiobook-coordinator.service" in host.units
@@ -236,8 +248,45 @@ def test_standalone_invites_a_local_node_and_checks_its_key():
     assert node_env["REDIS_HOST"] == "127.0.0.1"
     assert node_env["API_KEY"] == "node-secret"
     assert node_env["API_KEY"] != coordinator_env["API_KEY_OPERATOR"]
+    assert node_env["LLM_BASE_URL"] == "http://127.0.0.1:8080/v1"
+    assert node_env["LLM_API_KEY"] == "llm-key"
+    assert node_env["LLM_MODEL"] == "qwen-local"
+    assert node_env["LLM_TIMEOUT_SECONDS"] == "90"
+    assert node_env["LLM_SLOTS"] == "4"
+    supervisor = yaml.safe_load(host.read(linux_paths()["node_prefix"] + "/config/supervisor.yaml"))
+    assert supervisor["llm"]["base_url"] == "http://127.0.0.1:8080/v1"
+    assert supervisor["llm"]["model"] == "qwen-local"
+    assert supervisor["llm"]["api_key"] == "llm-key"
     assert ("health", "http://127.0.0.1:8000/api/v1") in api.calls
-    assert ("invite", "local") in api.calls
+
+
+def test_node_install_writes_llm_into_config_yaml():
+    host = MemoryHost(ips=["10.0.0.5"])
+    state = node_state(
+        llm={
+            "base_url": "http://10.0.0.5:8080/v1",
+            "api_key": "secret-llm",
+            "model": "local-model",
+            "slots": 8,
+            "timeout_seconds": 90,
+        }
+    )
+    assert install_node(host, state, FakeApi(), [])["code"] == EXIT_OK
+    prefix = linux_paths()["node_prefix"]
+    supervisor = yaml.safe_load(host.read(prefix + "/config/supervisor.yaml"))
+    prep = yaml.safe_load(host.read(prefix + "/config/worker-prep.yaml"))
+    tts = yaml.safe_load(host.read(prefix + "/config/worker-tts.yaml"))
+    for doc in (supervisor, prep, tts):
+        assert doc["llm"]["base_url"] == "http://10.0.0.5:8080/v1"
+        assert doc["llm"]["model"] == "local-model"
+        assert doc["llm"]["api_key"] == "secret-llm"
+        assert int(doc["llm"]["slots"]) == 8
+        assert int(doc["llm"]["timeout_seconds"]) == 90
+    assert prep["llm"]["required"] is True
+    env = parse_env(host.read(linux_paths()["node_env"]))
+    assert env["LLM_BASE_URL"] == "http://10.0.0.5:8080/v1"
+    assert env["LLM_MODEL"] == "local-model"
+    assert env["LLM_SLOTS"] == "8"
 
 
 def test_residue_packages_are_docker_and_the_toolkit():

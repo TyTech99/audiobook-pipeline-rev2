@@ -202,3 +202,196 @@ def test_classify_epub_item():
 
     body = {"page": 2, "item": "ch1.xhtml", "text": "This is a normal paragraph of body text.", "images": 0, "media_type": "application/xhtml+xml"}
     assert classify_epub_item(body) == ("kept", "body text")
+
+
+def test_llm_analyzer_normalizes_response():
+    from worker.common.llm_client import LLMClient, LLMSettings
+    from worker.prep.llm.analyzer import LLMAnalyzer
+
+    class FakeHttp:
+        def post(self, url, headers=None, json=None):
+            body = {
+                "choices": [
+                    {
+                        "message": {
+                            "content": """{
+                              "subject_summary": "A castle mystery.",
+                              "author_tone": "Dark and slow.",
+                              "narration_style_recommendations": [
+                                {"style": "noir-mystery", "reason": "Dark tone", "confidence": "high"},
+                                {"style": "literary-fiction", "reason": "Prose", "confidence": "medium"},
+                                {"style": "neutral", "reason": "Broad", "confidence": "medium"}
+                              ],
+                              "suggested_voice_recipes": [
+                                {"recipe": "narrator-deep-male-v2", "style": "noir-mystery", "reason": "Fits"}
+                              ]
+                            }"""
+                        }
+                    }
+                ]
+            }
+            return type(
+                "R",
+                (),
+                {
+                    "status_code": 200,
+                    "text": "",
+                    "json": lambda self=None: body,
+                },
+            )()
+
+    analyzer = LLMAnalyzer(
+        LLMClient(
+            LLMSettings(base_url="http://llm/v1", api_key="k", model="m"),
+            http=FakeHttp(),
+        )
+    )
+    result = analyzer.analyze(
+        title="The Castle",
+        author="Jane",
+        language="en",
+        pages=[{"text": "Chapter 1. The night was long and cold."}],
+    )
+    assert result["subject_summary"].startswith("A castle")
+    assert len(result["narration_style_recommendations"]) == 3
+    assert result["suggested_voice_recipes"][0]["recipe"] == "narrator-deep-male-v2"
+
+
+def test_llm_required_without_endpoint_raises():
+    from worker.common.llm_client import LLMError
+    from worker.prep.llm.analyzer import analyzer_from_settings
+
+    analyzer = analyzer_from_settings({"llm": {"base_url": "", "required": True}})
+    try:
+        analyzer.analyze(title="t", author="a", language="en", pages=[{"text": "hi"}])
+        assert False, "expected LLMError"
+    except LLMError as exc:
+        assert "base_url" in str(exc)
+
+
+def test_prep_worker_uses_analyzer(tmp_path):
+    from worker.prep.worker import PrepWorker
+
+    class StubAnalyzer:
+        def analyze(self, **kwargs):
+            return {
+                "subject_summary": "summary",
+                "author_tone": "tone",
+                "narration_style_recommendations": [
+                    {"style": "neutral", "reason": "r1", "confidence": "high"},
+                    {"style": "noir-mystery", "reason": "r2", "confidence": "medium"},
+                    {"style": "literary-fiction", "reason": "r3", "confidence": "low"},
+                ],
+                "suggested_voice_recipes": [],
+            }
+
+    class FakeRedis:
+        def brpop(self, keys, timeout=30):
+            return None
+
+    class FakeHttp:
+        def post(self, url, headers=None, json=None):
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+
+        def delete(self, url, headers=None):
+            return type("R", (), {"status_code": 200, "raise_for_status": lambda: None})()
+
+        def get(self, url, headers=None):
+            return type("R", (), {"status_code": 200, "content": b"", "raise_for_status": lambda: None})()
+
+    pdf = make_test_pdf()
+    pdf_path = tmp_path / "book.pdf"
+    pdf_path.write_bytes(pdf)
+    out = tmp_path / "out"
+    out.mkdir()
+    worker = PrepWorker(
+        {
+            "node_id": "n",
+            "coordinator_url": "http://c/api/v1",
+            "api_key": "k",
+            "redis_host": "localhost",
+            "redis_port": 6379,
+            "output_prefix": str(out) + "/",
+        },
+        http=FakeHttp(),
+        redis_client=FakeRedis(),
+        analyzer=StubAnalyzer(),
+    )
+    package = worker.process_job(
+        {
+            "job_id": "j1",
+            "input_format": "pdf",
+            "input_url": f"file://{pdf_path}",
+            "metadata": {"title": "T", "author": "A"},
+        }
+    )
+    assert package["llm_analysis"]["subject_summary"] == "summary"
+    assert (out / "llm-analysis.json").exists()
+    assert (out / "cover.jpg").exists()
+    cover_data = (out / "cover.jpg").read_bytes()
+    assert cover_data[:2] == b"\xff\xd8"
+
+
+def test_storage_download_upload_roundtrip(tmp_path):
+    from worker.common.storage import download_bytes, upload_package_dir, download_dir, upload_dir
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.txt").write_text("hello")
+    (src / "b.bin").write_bytes(b"\x00\x01\x02")
+
+    dest = tmp_path / "dest"
+    download_dir(str(src), dest)
+    assert (dest / "a.txt").read_text() == "hello"
+    assert (dest / "b.bin").read_bytes() == b"\x00\x01\x02"
+
+    out_prefix = tmp_path / "out" / "pkg"
+    upload_package_dir(str(out_prefix), {"x.json": '{"k": 1}', "y.bin": b"raw"})
+    assert (out_prefix / "x.json").read_text() == '{"k": 1}'
+    assert (out_prefix / "y.bin").read_bytes() == b"raw"
+
+    data = download_bytes(f"file://{src}/a.txt")
+    assert data == b"hello"
+
+    up_out = tmp_path / "up_out"
+    result = upload_dir(src, str(up_out))
+    assert result.endswith("/")
+    assert (up_out / "a.txt").read_text() == "hello"
+
+
+def test_storage_s3_raises():
+    from worker.common.storage import download_bytes
+
+    with pytest.raises(ValueError, match="s3://"):
+        download_bytes("s3://bucket/key")
+
+
+def test_cover_placeholder_produces_jpeg():
+    from worker.prep.cover import generate_placeholder
+
+    data = generate_placeholder("Test Book Title", "Test Author")
+    assert data[:2] == b"\xff\xd8"
+    assert data[-2:] == b"\xff\xd9"
+
+
+def test_isbn_regex_finds_isbn():
+    from worker.prep.metadata_enrich import find_isbn_in_text
+
+    text = "Published by Test Press. ISBN 978-0-306-40615-7. Copyright 2026."
+    assert find_isbn_in_text(text) == "9780306406157"
+
+    text2 = "ISBN-10: 0-306-40615-2"
+    assert find_isbn_in_text(text2) == "0306406152"
+
+    text3 = "No isbn here at all."
+    assert find_isbn_in_text(text3) is None
+
+
+def test_scan_pages_for_isbn():
+    from worker.prep.metadata_enrich import scan_pages_for_isbn
+
+    pages = [
+        {"text": "Chapter 1"},
+        {"text": "ISBN 978-0-306-40615-7"},
+    ]
+    assert scan_pages_for_isbn(pages) == "9780306406157"

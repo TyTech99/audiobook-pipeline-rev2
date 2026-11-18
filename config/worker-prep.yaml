@@ -22,6 +22,23 @@ s3:
   secret_key: "${S3_SECRET_KEY}"
   region: "us-east-1"
 
+storage:
+  root: "${STORAGE_ROOT}"
+
+# OpenAI-compatible LLM interface for book analysis (llm-analysis.json).
+# Same schema as config/supervisor.yaml. On a node install the supervisor
+# copy is the live source; this file is used when the prep worker runs
+# directly and when the image is built. Values may be overridden by LLM_*
+# env injected from supervisor.yaml at container start.
+llm:
+  base_url: "http://127.0.0.1:8080/v1"
+  api_key: ""
+  model: "local-model"
+  timeout_seconds: 120
+  slots: 4
+  # Fail the prep job when base_url/model are missing or the call errors.
+  required: true
+
 queues:
   - "prep"
 

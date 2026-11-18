@@ -59,3 +59,13 @@ redis:
   host: 10.0.0.5
   port: 6379
   password: ""
+
+# OpenAI-compatible LLM interface. Optional at install: seeds
+# config/supervisor.yaml + worker-*.yaml on the node. Edit those YAML files
+# after install to change the endpoint without re-running invite.
+llm:
+  base_url: "http://10.0.0.5:8080/v1"
+  api_key: ""
+  model: "local-model"
+  timeout_seconds: 120
+  slots: 8

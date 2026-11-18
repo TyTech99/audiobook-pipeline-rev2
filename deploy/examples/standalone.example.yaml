@@ -28,6 +28,18 @@ s3_endpoint: ""
 # Leave empty to let the CLI generate the operator API key.
 operator_api_key: ""
 
+# OpenAI-compatible LLM interface. Optional at install: when set, audiobookctl
+# writes this block into config/supervisor.yaml, worker-prep.yaml, and
+# worker-tts.yaml under the node prefix. After install, edit those YAML files
+# directly (same keys). base_url examples: http://127.0.0.1:8080/v1
+llm:
+  base_url: "http://127.0.0.1:8080/v1"
+  api_key: ""
+  model: "local-model"
+  timeout_seconds: 120
+  # Local seat count advertised on worker registration. 0 = unset / cloud-style.
+  slots: 4
+
 # Queues the local node serves. Use [prep] when the machine has no GPU.
 # Use [prep, convert] when it has a GPU and you want both.
 queues:

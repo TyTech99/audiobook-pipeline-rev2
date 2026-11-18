@@ -11,15 +11,27 @@ import uuid
 import httpx
 import redis
 
+from worker.common.llm_client import llm_settings_from_mapping
+from worker.common.settings import flatten_worker_settings
+from worker.common.storage import download_bytes, upload_package_dir
+from worker.prep.cover import get_cover
 from worker.prep.epub_builder import build_epub
 from worker.prep.epub_parser import classify_epub_item, parse_epub
+from worker.prep.llm.analyzer import Analyzer, analyzer_from_settings
+from worker.prep.metadata_enrich import enrich_metadata
 from worker.prep.narrator_script import build_narrator_script, validate_script
 from worker.prep.page_ledger import build_page_ledger, validate_page_ledger
 from worker.prep.pdf_parser import classify_page, detect_chapters, parse_pdf
 
 
 class PrepWorker:
-    def __init__(self, settings: dict, http: httpx.Client | None = None, redis_client: redis.Redis | None = None):
+    def __init__(
+        self,
+        settings: dict,
+        http: httpx.Client | None = None,
+        redis_client: redis.Redis | None = None,
+        analyzer: Analyzer | None = None,
+    ):
         self.settings = settings
         self.http = http or httpx.Client(timeout=30)
         self.redis = redis_client or redis.Redis(
@@ -32,6 +44,7 @@ class PrepWorker:
         self.node_id = settings["node_id"]
         self.coordinator_url = settings["coordinator_url"].rstrip("/")
         self.api_key = settings["api_key"]
+        self.analyzer = analyzer if analyzer is not None else analyzer_from_settings(settings, http=self.http)
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
@@ -45,6 +58,9 @@ class PrepWorker:
                 "node_id": self.node_id,
                 "type": "prep",
                 "queues": ["prep"],
+                "capabilities": {
+                    "llm_slots": llm_settings_from_mapping(self.settings).slots,
+                },
             },
         )
         response.raise_for_status()
@@ -69,7 +85,7 @@ class PrepWorker:
         input_format = job["input_format"]
         input_url = job["input_url"]
 
-        data = self._download(input_url)
+        data = download_bytes(input_url, http_client=self.http)
 
         if input_format == "pdf":
             doc = parse_pdf(data)
@@ -89,6 +105,21 @@ class PrepWorker:
         title = metadata.get("title") or job.get("metadata", {}).get("title") or "Unknown Title"
         author = metadata.get("author") or job.get("metadata", {}).get("author") or "Unknown Author"
         language = job.get("metadata", {}).get("language") or "en"
+
+        metadata = enrich_metadata(
+            {
+                "title": title,
+                "author": author,
+                "subject": metadata.get("subject") or "",
+                "language": language,
+            },
+            doc["pages"],
+            http=self.http,
+        )
+        title = metadata.get("title") or title
+        author = metadata.get("author") or author
+
+        cover_bytes, cover_source = get_cover(data, input_format, title, author, http=self.http)
 
         ledger = build_page_ledger(input_format, input_url, doc["pages"], chapters)
         ledger_errors = validate_page_ledger(ledger, doc["total_pages"])
@@ -111,6 +142,7 @@ class PrepWorker:
                 "version": "1.0",
                 "source": {"format": input_format, "url": input_url, "page_count": doc["total_pages"]},
                 "book": {"title": title, "author": author, "language": language},
+                "cover": {"source": cover_source},
                 "statistics": {
                     "total_pages": doc["total_pages"],
                     "kept_pages": ledger["summary"]["kept"],
@@ -128,21 +160,30 @@ class PrepWorker:
             "epub": epub_data,
             "script": script,
             "page_ledger": ledger,
-            "metadata": {
-                "title": title,
-                "author": author,
-                "subject": metadata.get("subject") or "",
-                "language": language,
-            },
-            "llm_analysis": {
-                "subject_summary": "",
-                "author_tone": "",
-                "narration_style_recommendations": [],
-                "suggested_voice_recipes": [],
-            },
+            "metadata": metadata,
+            "cover": cover_bytes,
+            "llm_analysis": self.analyzer.analyze(
+                title=title,
+                author=author,
+                language=language,
+                pages=doc["pages"],
+            ),
         }
 
-        package_url = self._upload(job_id, package)
+        root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+        output_prefix = self.settings.get("output_prefix") or f"file://{root}/packages/{job_id}/"
+        package_url = upload_package_dir(
+            output_prefix,
+            {
+                "book.epub": package["epub"],
+                "script.json": json.dumps(package["script"]),
+                "page-ledger.json": json.dumps(package["page_ledger"]),
+                "metadata.json": json.dumps(package["metadata"]),
+                "llm-analysis.json": json.dumps(package["llm_analysis"]),
+                "manifest.json": json.dumps(package["manifest"]),
+                "cover.jpg": package["cover"],
+            },
+        )
 
         self.http.post(
             f"{self.coordinator_url}/jobs/{job_id}/complete",
@@ -156,45 +197,6 @@ class PrepWorker:
         )
 
         return package
-
-    def _download(self, url: str) -> bytes:
-        if url.startswith("s3://"):
-            raise NotImplementedError("S3 download not implemented in this slice")
-        if url.startswith("file://"):
-            path = url[len("file://"):]
-            with open(path, "rb") as f:
-                return f.read()
-        response = self.http.get(url)
-        response.raise_for_status()
-        return response.content
-
-    def _upload(self, job_id: str, package: dict) -> str:
-        output_prefix = self.settings.get("output_prefix") or f"s3://bucket/packages/{job_id}/"
-        if output_prefix.startswith("file://"):
-            import pathlib
-
-            path = pathlib.Path(output_prefix[len("file://"):])
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "book.epub").write_bytes(package["epub"])
-            (path / "script.json").write_text(json.dumps(package["script"]))
-            (path / "page-ledger.json").write_text(json.dumps(package["page_ledger"]))
-            (path / "metadata.json").write_text(json.dumps(package["metadata"]))
-            (path / "llm-analysis.json").write_text(json.dumps(package["llm_analysis"]))
-            (path / "manifest.json").write_text(json.dumps(package["manifest"]))
-            return str(path) + "/"
-        if output_prefix.endswith("/"):
-            import pathlib
-
-            path = pathlib.Path(output_prefix)
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "book.epub").write_bytes(package["epub"])
-            (path / "script.json").write_text(json.dumps(package["script"]))
-            (path / "page-ledger.json").write_text(json.dumps(package["page_ledger"]))
-            (path / "metadata.json").write_text(json.dumps(package["metadata"]))
-            (path / "llm-analysis.json").write_text(json.dumps(package["llm_analysis"]))
-            (path / "manifest.json").write_text(json.dumps(package["manifest"]))
-            return str(path) + "/"
-        return f"s3://bucket/packages/{job_id}/"
 
     def run(self, max_jobs: int | None = None) -> None:
         self.register()
@@ -224,12 +226,30 @@ class PrepWorker:
         self.http.delete(f"{self.coordinator_url}/workers/{self.worker_id}", headers=self._headers())
 
 
+def _expand_env(value):
+    import re
+
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+    def repl(match):
+        return os.environ.get(match.group(1), "")
+
+    if isinstance(value, str):
+        return pattern.sub(repl, value)
+    if isinstance(value, list):
+        return [_expand_env(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _expand_env(item) for key, item in value.items()}
+    return value
+
+
 def main() -> None:
     import yaml
 
     path = os.environ.get("PREP_WORKER_CONFIG", "config/worker-prep.yaml")
     with open(path) as f:
-        settings = yaml.safe_load(f)
+        raw = _expand_env(yaml.safe_load(f))
+    settings = flatten_worker_settings(raw)
     worker = PrepWorker(settings)
     worker.run()
 

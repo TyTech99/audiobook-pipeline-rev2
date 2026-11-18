@@ -16,12 +16,28 @@ redis:
   password: "${REDIS_PASSWORD}"
   db: 0
 
+# OpenAI-compatible LLM interface (prep analysis + TTS recipe annotation).
+# Edit these values on the node. audiobookctl can also seed them from the
+# install state file `llm:` block into this file under /opt/audiobook/config/.
+# The supervisor injects them into worker/recipe containers as LLM_*.
+llm:
+  # Base URL of the chat-completions API (with or without trailing /v1).
+  base_url: "http://127.0.0.1:8080/v1"
+  # Bearer token when the endpoint requires one. Leave empty for open local servers.
+  api_key: ""
+  # Model id the endpoint expects (local name or provider model string).
+  model: "local-model"
+  timeout_seconds: 120
+  # Parallel annotation seats advertised on worker register. 0 = unset.
+  slots: 4
+
 docker:
   socket: "/var/run/docker.sock"
   images:
-    prep: "registry.example.com/audiobook/worker-prep:latest"
-    tts: "registry.example.com/audiobook/worker-tts:latest"
-    probe: "audiobook-probe:dev"
+    prep: "${PREP_IMAGE:-audiobook-worker-prep:local}"
+    tts: "${TTS_IMAGE:-audiobook-worker-tts:local}"
+    recipe: "${RECIPE_IMAGE:-audiobook-recipe-michael:local}"
+    probe: "${PROBE_IMAGE:-audiobook-probe:dev}"
 
 working_hours:
   enabled: true

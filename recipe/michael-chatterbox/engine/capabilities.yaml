@@ -1,0 +1,42 @@
+# Chatterbox TTS engine capabilities
+# Used by the LLM annotation prompt to know what markup is supported.
+
+engine: "chatterbox"
+version: "0.1.7"
+repo: "ResembleAI/chatterbox"
+
+# Chatterbox is a zero-shot voice cloning model. It takes plain text and a
+# reference audio sample, and generates speech that matches the reference
+# voice. It does NOT support inline prosody markup in the text itself.
+#
+# Therefore, "annotation" for Chatterbox is limited to:
+# - Light text cleanup (normalizing punctuation for better prosody)
+# - Performance style guidance (passed as a system prompt to the LLM,
+#   which may subtly rephrase punctuation to influence delivery)
+#
+# The actual voice characteristics (pitch, timbre, pace) come entirely
+# from the reference audio sample (voices/Michael.wav).
+
+supported_markup:
+  - type: "none"
+    description: "Chatterbox reads plain text. No inline markup is interpreted."
+
+prosody_control:
+  inline: false
+  via_punctuation: true
+  notes: >
+    Punctuation influences pauses and intonation.
+    Use ellipses (...) for trailing off, em dashes (—) for interruptions,
+    and exclamation/question marks for emphasis.
+
+voice_cloning:
+  method: "zero-shot"
+  reference_required: true
+  reference_length: "5-30 seconds recommended"
+  reference_quality: "Clean speech, minimal background noise"
+
+limitations:
+  - "No per-word emphasis control"
+  - "No character voice switching within a single generation"
+  - "No explicit pause duration control"
+  - "Long texts should be chunked (recommended < 300 chars per call)"

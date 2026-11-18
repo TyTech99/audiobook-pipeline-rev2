@@ -1,0 +1,6 @@
+httpx
+redis
+pyyaml
+pymupdf
+pillow
+isbnlib

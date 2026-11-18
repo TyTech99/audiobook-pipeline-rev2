@@ -138,6 +138,12 @@ def test_tts_worker_process_job(tmp_path):
         "redis_host": "localhost",
         "redis_port": 6379,
         "output_prefix": str(output_prefix) + "/",
+        "llm": {
+            "base_url": "http://llm:8080/v1",
+            "api_key": "llm-key",
+            "model": "annotator",
+            "slots": 2,
+        },
     }
     worker = TTSWorker(settings, runner=runner, http=http, redis_client=FakeRedis())
 
@@ -151,6 +157,9 @@ def test_tts_worker_process_job(tmp_path):
     result = worker.process_job(job)
     assert result["job_id"] == "test-job"
     assert runner.calls[0]["image"] == "test-recipe:latest"
+    assert runner.calls[0]["env"]["LLM_BASE_URL"] == "http://llm:8080/v1"
+    assert runner.calls[0]["env"]["LLM_MODEL"] == "annotator"
+    assert runner.calls[0]["env"]["LLM_API_KEY"] == "llm-key"
     assert any("complete" in c["url"] for c in http.calls)
 
     out = pathlib.Path(output_prefix)

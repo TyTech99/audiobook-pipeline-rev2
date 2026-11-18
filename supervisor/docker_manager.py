@@ -15,7 +15,7 @@ class ProbeRunner:
     def run(self, name: str, image: str, env: dict, timeout: int) -> int:
         raise NotImplementedError
 
-    def start_worker(self, name: str, image: str, env: dict, gpu: bool) -> None:
+    def start_worker(self, name: str, image: str, env: dict, gpu: bool, volumes: list[str], extra_devices: list[str]) -> None:
         raise NotImplementedError
 
     def stop_worker(self, name: str) -> None:
@@ -60,7 +60,7 @@ class DockerProbeRunner(ProbeRunner):
                 pass
         return code
 
-    def start_worker(self, name: str, image: str, env: dict, gpu: bool) -> None:
+    def start_worker(self, name: str, image: str, env: dict, gpu: bool, volumes: list[str], extra_devices: list[str]) -> None:
         try:
             existing = self.client.containers.get(name)
             existing.remove(force=True)
@@ -72,7 +72,10 @@ class DockerProbeRunner(ProbeRunner):
             "detach": True,
             "environment": env,
             "restart_policy": {"Name": "no"},
+            "volumes": volumes,
         }
+        if extra_devices:
+            kwargs["devices"] = extra_devices
         if gpu:
             kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
         self.client.containers.run(**kwargs)
@@ -116,6 +119,7 @@ class DockerManager:
             "S3_BUCKET": self.settings.s3_bucket,
             "S3_ACCESS_KEY": self.settings.s3_access_key,
             "S3_SECRET_KEY": self.settings.s3_secret_key,
+            **self._llm_env(),
         }
         code = self.runner.run(name, self.settings.probe_image, env, timeout=60)
         if code != 0:
@@ -141,12 +145,30 @@ class DockerManager:
             "S3_BUCKET": self.settings.s3_bucket,
             "S3_ACCESS_KEY": self.settings.s3_access_key,
             "S3_SECRET_KEY": self.settings.s3_secret_key,
+            "STORAGE_ROOT": "/var/lib/audiobook",
+            **self._llm_env(),
         }
+        if worker_type == "tts":
+            env["DEFAULT_RECIPE_IMAGE"] = self.settings.recipe_image
+        volumes = ["/var/lib/audiobook:/var/lib/audiobook"]
+        extra_devices: list[str] = []
+        if worker_type == "tts":
+            # Mount docker.sock so the TTS worker can launch recipe containers.
+            volumes.append("/var/run/docker.sock:/var/run/docker.sock")
         gpu = worker_type == "tts"
-        self.runner.start_worker(name, image, env, gpu)
+        self.runner.start_worker(name, image, env, gpu, volumes, extra_devices)
         import time
 
         self.worker_started_at[name] = time.time()
+
+    def _llm_env(self) -> dict[str, str]:
+        return {
+            "LLM_BASE_URL": self.settings.llm_base_url,
+            "LLM_API_KEY": self.settings.llm_api_key,
+            "LLM_MODEL": self.settings.llm_model,
+            "LLM_TIMEOUT_SECONDS": str(self.settings.llm_timeout_seconds),
+            "LLM_SLOTS": str(self.settings.llm_slots),
+        }
 
     def stop_worker(self, worker_type: str) -> None:
         name = f"audiobook-worker-{worker_type}"

@@ -25,9 +25,15 @@ def settings(**overrides) -> SupervisorSettings:
         s3_bucket="",
         s3_access_key="",
         s3_secret_key="",
+        llm_base_url="http://llm:8080/v1",
+        llm_api_key="llm-secret",
+        llm_model="local-model",
+        llm_timeout_seconds=90,
+        llm_slots=4,
         probe_image="audiobook-probe:dev",
         prep_image="audiobook-prep:latest",
         tts_image="audiobook-tts:latest",
+        recipe_image="audiobook-recipe-michael:local",
         queues=["prep", "convert"],
         working_hours={"enabled": False, "start": "22:00", "end": "08:00", "timezone": "UTC"},
         heartbeat_interval_seconds=30,
@@ -62,8 +68,8 @@ class FakeRunner(ProbeRunner):
         self.running_containers.add(name)
         return self.code
 
-    def start_worker(self, name: str, image: str, env: dict, gpu: bool) -> None:
-        self.runs.append((name, image, env, None))
+    def start_worker(self, name: str, image: str, env: dict, gpu: bool, volumes: list[str], extra_devices: list[str]) -> None:
+        self.runs.append((name, image, env, None, volumes, extra_devices))
         self.running_containers.add(name)
 
     def stop_worker(self, name: str) -> None:
@@ -82,7 +88,14 @@ def test_docker_manager_starts_prep_worker():
 
     docker.start_worker("prep")
     assert "audiobook-worker-prep" in runner.running_containers
-    assert any(r[0] == "audiobook-worker-prep" and r[1] == "audiobook-prep:latest" for r in runner.runs)
+    match = next(r for r in runner.runs if r[0] == "audiobook-worker-prep")
+    assert match[1] == "audiobook-prep:latest"
+    assert match[2]["LLM_BASE_URL"] == "http://llm:8080/v1"
+    assert match[2]["LLM_API_KEY"] == "llm-secret"
+    assert match[2]["LLM_MODEL"] == "local-model"
+    assert match[2]["LLM_SLOTS"] == "4"
+    assert match[2]["STORAGE_ROOT"] == "/var/lib/audiobook"
+    assert "/var/lib/audiobook:/var/lib/audiobook" in match[4]
 
 
 def test_docker_manager_starts_tts_worker():
@@ -92,7 +105,10 @@ def test_docker_manager_starts_tts_worker():
 
     docker.start_worker("tts")
     assert "audiobook-worker-tts" in runner.running_containers
-    assert any(r[0] == "audiobook-worker-tts" and r[1] == "audiobook-tts:latest" for r in runner.runs)
+    match = next(r for r in runner.runs if r[0] == "audiobook-worker-tts")
+    assert match[1] == "audiobook-tts:latest"
+    assert match[2]["DEFAULT_RECIPE_IMAGE"] == "audiobook-recipe-michael:local"
+    assert "/var/run/docker.sock:/var/run/docker.sock" in match[4]
 
 
 def test_docker_manager_stops_worker():

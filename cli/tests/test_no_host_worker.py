@@ -21,9 +21,12 @@ def test_supervisor_service_and_image_stay_off_the_host_venv():
     assert 'CMD ["python", "-m", "supervisor.supervisor"]' in image
 
 
-def test_prep_and_tts_have_no_dockerfile_yet():
+def test_prep_and_tts_readmes_state_implementation_status():
+    # Worker images live under deploy/, not inside worker/*/.
     for folder in ("worker/prep", "worker/tts"):
         path = ROOT / folder
         assert list(path.glob("Dockerfile")) == []
         readme = (path / "README.md").read_text()
-        assert "Not yet implemented" in readme
+        assert "Implementation status" in readme
+    assert (ROOT / "deploy/worker-prep.Dockerfile").is_file()
+    assert (ROOT / "deploy/worker-tts.Dockerfile").is_file()

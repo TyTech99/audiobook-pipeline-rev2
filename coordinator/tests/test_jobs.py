@@ -47,16 +47,51 @@ def test_submit_convert_job(app, sql):
         json={
             "type": "convert",
             "input_format": "epub",
-            "input_url": "s3://bucket/packages/test/",
-            "metadata": {},
+            "input_url": "file:///var/lib/audiobook/packages/prep-id/",
+            "metadata": {"performance_style": "neutral"},
         },
     )
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"] == "submitted"
+    job_id = body["job_id"]
+
+    rows = sql("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
+    assert rows[0]["package_url"] == "file:///var/lib/audiobook/packages/prep-id/"
+    assert rows[0]["input_url"] == "file:///var/lib/audiobook/packages/prep-id/"
 
     redis_client = app.app.state.redis
     assert redis_client.llen("convert") == 1
+    import json
+
+    msg = json.loads(redis_client.lpop("convert"))
+    assert msg["package_url"] == "file:///var/lib/audiobook/packages/prep-id/"
+    assert msg["input_url"] == msg["package_url"]
+    assert msg["performance_style"] == "neutral"
+
+
+def test_complete_convert_job_from_submitted(app, sql):
+    created = app.post(
+        "/api/v1/jobs",
+        headers=OP,
+        json={
+            "type": "convert",
+            "input_format": "epub",
+            "input_url": "file:///var/lib/audiobook/packages/p1/",
+            "metadata": {},
+        },
+    )
+    job_id = created.json()["job_id"]
+    response = app.post(
+        f"/api/v1/jobs/{job_id}/complete",
+        headers=OP,
+        json={"output_url": "file:///var/lib/audiobook/audio/out/"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "complete"
+    rows = sql("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
+    assert rows[0]["status"] == "complete"
+    assert rows[0]["output_url"] == "file:///var/lib/audiobook/audio/out/"
 
 
 def test_get_job(app):

@@ -3,6 +3,8 @@ from __future__ import annotations
 import secrets
 from pathlib import Path
 
+import yaml
+
 from cli.hosts import linux_paths, windows_paths
 from cli.policy import PolicyError, validate_api_url, validate_redis_advertise
 from cli.state import dump_env, parse_env
@@ -56,9 +58,78 @@ def render_coordinator_env(state: dict, existing: dict) -> dict:
     }
 
 
+def resolve_llm_config(state: dict | None = None, existing: dict | None = None) -> dict:
+    """LLM interface settings for config/*.yaml.
+
+    Source order: install state `llm:` block, then any existing YAML llm block,
+    then repo defaults. The live source of truth after install is
+    config/supervisor.yaml (and the matching worker YAML copies).
+    """
+    state = state or {}
+    existing = existing or {}
+    from_state = state.get("llm") if isinstance(state.get("llm"), dict) else {}
+    defaults = {
+        "base_url": "http://127.0.0.1:8080/v1",
+        "api_key": "",
+        "model": "local-model",
+        "timeout_seconds": 120,
+        "slots": 4,
+        "required": True,
+    }
+    out = dict(defaults)
+    out.update({k: v for k, v in existing.items() if v is not None and v != ""})
+    # Empty api_key from state is intentional; only skip missing keys.
+    for key, value in from_state.items():
+        if value is None:
+            continue
+        if key == "api_key" or value != "":
+            out[key] = value
+    # Flat state keys used by older callers.
+    if state.get("llm_base_url"):
+        out["base_url"] = state["llm_base_url"]
+    if state.get("llm_api_key") is not None and "api_key" not in from_state:
+        out["api_key"] = state["llm_api_key"]
+    if state.get("llm_model"):
+        out["model"] = state["llm_model"]
+    if state.get("llm_timeout_seconds") is not None and "timeout_seconds" not in from_state:
+        out["timeout_seconds"] = state["llm_timeout_seconds"]
+    if state.get("llm_slots") is not None and "slots" not in from_state:
+        out["slots"] = state["llm_slots"]
+    try:
+        out["timeout_seconds"] = int(out.get("timeout_seconds") or 120)
+    except (TypeError, ValueError):
+        out["timeout_seconds"] = 120
+    try:
+        out["slots"] = int(out.get("slots") or 0)
+    except (TypeError, ValueError):
+        out["slots"] = 0
+    out["base_url"] = str(out.get("base_url") or "").strip()
+    out["api_key"] = str(out.get("api_key") or "")
+    out["model"] = str(out.get("model") or "").strip()
+    out["required"] = bool(out.get("required", True))
+    return out
+
+
+def apply_llm_to_config_yaml(text: str, llm: dict, *, include_required: bool = False) -> str:
+    """Replace or insert the top-level `llm:` mapping in a config YAML document."""
+    data = yaml.safe_load(text) or {}
+    block = {
+        "base_url": llm.get("base_url") or "",
+        "api_key": llm.get("api_key") or "",
+        "model": llm.get("model") or "",
+        "timeout_seconds": int(llm.get("timeout_seconds") or 120),
+        "slots": int(llm.get("slots") or 0),
+    }
+    if include_required:
+        block["required"] = bool(llm.get("required", True))
+    data["llm"] = block
+    return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+
+
 def render_node_env(state: dict) -> dict:
     hours = state.get("working_hours") or {}
     redis_cfg = state.get("redis") or {}
+    llm = resolve_llm_config(state)
     return {
         "NODE_ID": state.get("node_id") or "local",
         "API_KEY": state.get("node_api_key") or "",
@@ -73,6 +144,12 @@ def render_node_env(state: dict) -> dict:
         "HOURS_END": str(hours.get("end") or ""),
         "HOURS_TIMEZONE": str(hours.get("timezone") or ""),
         "PROBE_IMAGE": state.get("probe_image") or "audiobook-probe:dev",
+        # Mirrored for containers; primary operator edit surface is config/*.yaml.
+        "LLM_BASE_URL": str(llm.get("base_url") or ""),
+        "LLM_API_KEY": str(llm.get("api_key") or ""),
+        "LLM_MODEL": str(llm.get("model") or ""),
+        "LLM_TIMEOUT_SECONDS": str(llm.get("timeout_seconds") or 120),
+        "LLM_SLOTS": str(llm.get("slots") or 0),
     }
 
 
@@ -172,7 +249,7 @@ def install_node(host, state: dict, api, messages: list[str]) -> dict:
         host.write(r"C:\ProgramData\audiobook\hardware.json", '{"cpu":1,"ram_gb":1.0,"gpu":null}\n')
         host.install_task(paths["node_task"], _node_task())
     else:
-        _install_supervisor_files(host, paths["node_prefix"])
+        _install_supervisor_files(host, paths["node_prefix"], state)
         host.install_unit(paths["node_unit"], _node_unit(paths["node_prefix"]))
     messages.append("node installed")
     return {"code": EXIT_OK, "changed": True}
@@ -274,6 +351,7 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
             "password": env["REDIS_PASSWORD"],
         },
         "probe_image": state.get("probe_image") or "audiobook-probe:dev",
+        "llm": state.get("llm") if isinstance(state.get("llm"), dict) else {},
     }
     invited = api.invite(
         node_state["coordinator_url"],
@@ -316,7 +394,13 @@ def _copy_tree(host, source: Path, dest_root: str) -> None:
             continue
         if "__pycache__" in path.parts or "tests" in path.parts or path.suffix == ".pyc":
             continue
-        host.write(dest_root + "/" + path.relative_to(source).as_posix(), path.read_text())
+        if path.suffix in {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".bin", ".pt", ".pth", ".safetensors"}:
+            continue
+        try:
+            text = path.read_text()
+        except (UnicodeDecodeError, ValueError):
+            continue
+        host.write(dest_root + "/" + path.relative_to(source).as_posix(), text)
 
 
 def _install_coordinator_files(host, prefix: str, state: dict) -> None:
@@ -334,12 +418,28 @@ def _install_coordinator_files(host, prefix: str, state: dict) -> None:
     host.write(prefix + "/config/coordinator.yaml", (root / "config" / "coordinator.yaml").read_text())
 
 
-def _install_supervisor_files(host, prefix: str) -> None:
+def _install_supervisor_files(host, prefix: str, state: dict | None = None) -> None:
     root = _repo_root()
     host.write(prefix + "/supervisor.Dockerfile", (root / "deploy" / "supervisor.Dockerfile").read_text())
+    host.write(prefix + "/worker-prep.Dockerfile", (root / "deploy" / "worker-prep.Dockerfile").read_text())
+    host.write(prefix + "/worker-tts.Dockerfile", (root / "deploy" / "worker-tts.Dockerfile").read_text())
+    host.write(prefix + "/recipe-michael.Dockerfile", (root / "deploy" / "recipe-michael.Dockerfile").read_text())
+    host.write(prefix + "/probe.Dockerfile", (root / "deploy" / "probe.Dockerfile").read_text())
+    host.write(prefix + "/build-images.sh", (root / "deploy" / "build-images.sh").read_text())
     host.write(prefix + "/record-hardware.sh", RECORD_HARDWARE)
     _copy_tree(host, root / "supervisor", prefix + "/supervisor")
-    host.write(prefix + "/config/supervisor.yaml", (root / "config" / "supervisor.yaml").read_text())
+    _copy_tree(host, root / "worker", prefix + "/worker")
+    llm = resolve_llm_config(state)
+    supervisor_yaml = (root / "config" / "supervisor.yaml").read_text()
+    prep_yaml = (root / "config" / "worker-prep.yaml").read_text()
+    tts_yaml = (root / "config" / "worker-tts.yaml").read_text()
+    host.write(prefix + "/config/supervisor.yaml", apply_llm_to_config_yaml(supervisor_yaml, llm))
+    host.write(
+        prefix + "/config/worker-prep.yaml",
+        apply_llm_to_config_yaml(prep_yaml, llm, include_required=True),
+    )
+    host.write(prefix + "/config/worker-tts.yaml", apply_llm_to_config_yaml(tts_yaml, llm))
+    _copy_tree(host, root / "recipe", prefix + "/recipe")
 
 
 def _coordinator_unit(prefix: str) -> str:
@@ -368,9 +468,11 @@ def _node_unit(prefix: str) -> str:
         "[Service]\n"
         f"ExecStartPre=/bin/sh {prefix}/record-hardware.sh\n"
         f"ExecStartPre=docker build -t {SUPERVISOR_IMAGE} -f {prefix}/supervisor.Dockerfile {prefix}\n"
+        f"ExecStartPre=/bin/sh {prefix}/build-images.sh\n"
         "ExecStartPre=docker rm -f audiobook-supervisor\n"
         "ExecStart=docker run --name audiobook-supervisor --rm "
         "-v /var/run/docker.sock:/var/run/docker.sock "
+        "-v /var/lib/audiobook:/var/lib/audiobook "
         "--env-file /etc/audiobook/node.env "
         "-e HARDWARE_FILE=/etc/audiobook/hardware.json "
         "-v /etc/audiobook/hardware.json:/etc/audiobook/hardware.json:ro "

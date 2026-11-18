@@ -7,9 +7,15 @@ import redis
 from psycopg import Connection
 from psycopg.types.json import Json
 
+import os
+
 from coordinator.clock import iso, utcnow
 from coordinator.config import Settings
 from coordinator.errors import ApiError
+
+
+def _storage_root() -> str:
+    return os.environ.get("STORAGE_ROOT", "/var/lib/audiobook")
 
 PREP_QUEUE = "prep"
 CONVERT_QUEUE = "convert"
@@ -58,24 +64,29 @@ def submit_job(conn: Connection, body: dict, settings: Settings, redis_client: r
     job_type = body.get("type")
     if job_type not in ("prep", "convert"):
         raise ApiError(400, "invalid_request", "type must be prep or convert")
-    if job_type == "prep" and not body.get("input_url"):
-        raise ApiError(400, "invalid_request", "input_url is required for prep jobs")
+    if not body.get("input_url"):
+        raise ApiError(400, "invalid_request", "input_url is required")
+    # Convert jobs take the prep package path as input_url. The queue message
+    # also carries package_url so TTS workers can download without remapping.
+    package_url = body.get("input_url") if job_type == "convert" else None
+    metadata = body.get("metadata") or {}
     job_id = uuid4()
     now = utcnow()
     conn.execute(
         """
         INSERT INTO jobs (
-            job_id, type, status, input_format, input_url, metadata,
+            job_id, type, status, input_format, input_url, package_url, metadata,
             prep, convert, progress, error, retry_count, created_at, updated_at
         )
-        VALUES (%s, %s, 'submitted', %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+        VALUES (%s, %s, 'submitted', %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
         """,
         (
             job_id,
             job_type,
             body.get("input_format"),
             body.get("input_url"),
-            Json(body.get("metadata") or {}),
+            package_url,
+            Json(metadata),
             Json({}),
             Json({}),
             Json({}),
@@ -85,15 +96,21 @@ def submit_job(conn: Connection, body: dict, settings: Settings, redis_client: r
         ),
     )
     queue = PREP_QUEUE if job_type == "prep" else CONVERT_QUEUE
+    root = _storage_root()
+    subdir = "packages" if job_type == "prep" else "audio"
     message = {
         "job_id": str(job_id),
         "type": job_type,
         "input_format": body.get("input_format"),
         "input_url": body.get("input_url"),
-        "output_prefix": f"s3://bucket/packages/{job_id}/",
-        "metadata": body.get("metadata") or {},
+        "output_prefix": f"file://{root}/{subdir}/{job_id}/",
+        "metadata": metadata,
         "created_at": iso(now),
     }
+    if job_type == "convert":
+        message["package_url"] = package_url
+        message["voice_recipe"] = metadata.get("voice_recipe") or {}
+        message["performance_style"] = metadata.get("performance_style") or "neutral"
     redis_client.rpush(queue, json.dumps(message))
     return {"job_id": str(job_id), "status": "submitted", "created_at": iso(now)}
 
@@ -135,16 +152,21 @@ def report_progress(conn: Connection, job_id, body: dict, node_id: str | None) -
 
 def mark_in_progress(conn: Connection, job_id, worker_id: str, stage: str) -> dict:
     row = _load_job(conn, job_id)
-    if stage == "prep":
+    # Prep jobs: submitted → in_progress. Convert jobs (separate type): submitted → converting.
+    if row["type"] == "convert" or stage == "convert":
+        if row["type"] == "convert":
+            if row["status"] != "submitted":
+                raise ApiError(409, "invalid_state", "job is not submitted", {"status": row["status"]})
+        else:
+            if row["status"] != "prep_complete":
+                raise ApiError(409, "invalid_state", "job is not prep_complete", {"status": row["status"]})
+        new_status = "converting"
+        phase = "convert"
+    else:
         if row["status"] != "submitted":
             raise ApiError(409, "invalid_state", "job is not submitted", {"status": row["status"]})
         new_status = "in_progress"
         phase = "prep"
-    else:
-        if row["status"] != "prep_complete":
-            raise ApiError(409, "invalid_state", "job is not prep_complete", {"status": row["status"]})
-        new_status = "converting"
-        phase = "convert"
     now = utcnow()
     phase_data = row[phase] or {}
     phase_data["worker_id"] = worker_id
@@ -159,7 +181,25 @@ def mark_in_progress(conn: Connection, job_id, worker_id: str, stage: str) -> di
 def complete_job(conn: Connection, job_id, body: dict, worker_id: str) -> dict:
     row = _load_job(conn, job_id)
     now = utcnow()
-    if row["status"] in ("submitted", "in_progress"):
+    # Branch on job type so a fresh convert job (status submitted) can finish
+    # without a fake prep_complete transition.
+    if row["type"] == "convert":
+        if row["status"] not in ("submitted", "converting"):
+            raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
+        new_status = "complete"
+        phase_data = row["convert"] or {}
+        phase_data["worker_id"] = worker_id
+        phase_data["completed_at"] = iso(now)
+        if body.get("voice_recipe") is not None:
+            phase_data["voice_recipe"] = body["voice_recipe"]
+        if body.get("performance_style") is not None:
+            phase_data["performance_style"] = body["performance_style"]
+        output_url = body.get("output_url")
+        conn.execute(
+            "UPDATE jobs SET status = %s, output_url = %s, convert = %s, updated_at = %s WHERE job_id = %s",
+            (new_status, output_url, Json(phase_data), now, job_id),
+        )
+    elif row["status"] in ("submitted", "in_progress"):
         new_status = "prep_complete"
         phase_data = row["prep"] or {}
         phase_data["worker_id"] = worker_id
@@ -175,19 +215,10 @@ def complete_job(conn: Connection, job_id, body: dict, worker_id: str) -> dict:
             "UPDATE jobs SET status = %s, package_url = %s, prep = %s, updated_at = %s WHERE job_id = %s",
             (new_status, package_url, Json(phase_data), now, job_id),
         )
-    elif row["status"] == "converting":
-        new_status = "complete"
-        phase_data = row["convert"] or {}
-        phase_data["worker_id"] = worker_id
-        phase_data["completed_at"] = iso(now)
-        output_url = body.get("output_url")
-        conn.execute(
-            "UPDATE jobs SET status = %s, output_url = %s, convert = %s, updated_at = %s WHERE job_id = %s",
-            (new_status, output_url, Json(phase_data), now, job_id),
-        )
     else:
         raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
     return {"job_id": str(job_id), "status": new_status}
+
 
 
 def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client: redis.Redis, settings: Settings) -> dict:
@@ -196,41 +227,53 @@ def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client:
     error = body.get("error") or "unknown error"
     retry_count = row["retry_count"] + 1
     max_retries = int(settings.raw.get("job", {}).get("max_retries") or 3)
-    if row["status"] == "in_progress":
+    metadata = row["metadata"] or {}
+    is_convert = row["type"] == "convert" or row["status"] == "converting"
+    if is_convert:
+        if row["status"] not in ("submitted", "converting"):
+            raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
+        if retry_count >= max_retries:
+            new_status = "convert_failed"
+            redis_client.rpush(FAILED_QUEUE, json.dumps({"job_id": str(job_id), "error": error, "retry_count": retry_count}))
+        else:
+            new_status = "submitted"
+            root = _storage_root()
+            package_url = row["package_url"] or row["input_url"]
+            message = {
+                "job_id": str(job_id),
+                "type": "convert",
+                "input_url": row["input_url"],
+                "package_url": package_url,
+                "output_prefix": f"file://{root}/audio/{job_id}/",
+                "voice_recipe": (row["convert"] or {}).get("voice_recipe") or metadata.get("voice_recipe") or {},
+                "performance_style": (row["convert"] or {}).get("performance_style")
+                or metadata.get("performance_style")
+                or "neutral",
+                "metadata": metadata,
+                "created_at": iso(row["created_at"]),
+            }
+            redis_client.rpush(CONVERT_QUEUE, json.dumps(message))
+        phase = "convert"
+    elif row["status"] in ("submitted", "in_progress"):
         if retry_count >= max_retries:
             new_status = "failed"
             redis_client.rpush(FAILED_QUEUE, json.dumps({"job_id": str(job_id), "error": error, "retry_count": retry_count}))
         else:
             new_status = "submitted"
+            root = _storage_root()
             message = {
                 "job_id": str(job_id),
                 "type": "prep",
                 "input_format": row["input_format"],
                 "input_url": row["input_url"],
-                "output_prefix": f"s3://bucket/packages/{job_id}/",
-                "metadata": row["metadata"] or {},
+                "output_prefix": f"file://{root}/packages/{job_id}/",
+                "metadata": metadata,
                 "created_at": iso(row["created_at"]),
             }
             redis_client.rpush(PREP_QUEUE, json.dumps(message))
-    elif row["status"] == "converting":
-        if retry_count >= max_retries:
-            new_status = "convert_failed"
-            redis_client.rpush(FAILED_QUEUE, json.dumps({"job_id": str(job_id), "error": error, "retry_count": retry_count}))
-        else:
-            new_status = "prep_complete"
-            message = {
-                "job_id": str(job_id),
-                "type": "convert",
-                "package_url": row["package_url"],
-                "output_prefix": f"s3://bucket/audio/{job_id}/",
-                "voice_recipe": (row["convert"] or {}).get("voice_recipe"),
-                "performance_style": (row["convert"] or {}).get("performance_style"),
-                "created_at": iso(row["created_at"]),
-            }
-            redis_client.rpush(CONVERT_QUEUE, json.dumps(message))
+        phase = "prep"
     else:
         raise ApiError(409, "invalid_state", "job is not in progress", {"status": row["status"]})
-    phase = "prep" if row["status"] in ("submitted", "in_progress") else "convert"
     phase_data = row[phase] or {}
     phase_data["worker_id"] = worker_id
     if phase == "prep":
@@ -244,6 +287,7 @@ def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client:
             (new_status, error, retry_count, Json(phase_data), now, job_id),
         )
     return {"job_id": str(job_id), "status": new_status, "retry_count": retry_count}
+
 
 
 def cancel_job(conn: Connection, job_id) -> dict:
