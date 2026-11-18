@@ -7,6 +7,8 @@ services:
     command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
   postgres:
     image: postgres:16
     environment:
@@ -15,6 +17,8 @@ services:
       POSTGRES_DB: audiobook
     ports:
       - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
   coordinator:
     build:
       context: ..
@@ -33,3 +37,7 @@ services:
     depends_on:
       - redis
       - postgres
+
+volumes:
+  redis-data:
+  postgres-data:
