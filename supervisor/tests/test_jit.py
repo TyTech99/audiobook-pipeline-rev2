@@ -38,6 +38,8 @@ def settings(**overrides) -> SupervisorSettings:
         working_hours={"enabled": False, "start": "22:00", "end": "08:00", "timezone": "UTC"},
         heartbeat_interval_seconds=30,
         idle_timeout_seconds=300,
+        log_level="INFO",
+        log_file="",
     )
     base.update(overrides)
     return SupervisorSettings(**base)
