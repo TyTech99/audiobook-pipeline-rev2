@@ -1,26 +1,47 @@
-"""PDF parsing: PyMuPDF extraction + old pipeline's unit-based structure detection.
+"""PDF parsing: PyMuPDF extraction + OCR fallback + old pipeline's unit-based structure detection.
 
-The new pipeline uses PyMuPDF for text extraction (no poppler dependency).
-The old pipeline's structure detection works on "units" (pages with layout text
-and geometry). We convert PyMuPDF pages into units so the old structure.py,
-pageparts.py, and treatise.py can work without modification.
+The new pipeline uses PyMuPDF for text extraction. If a page has no text layer
+(scanned PDF), it falls back to Tesseract OCR. The old pipeline's structure
+detection works on "units" (pages with layout text and geometry). We convert
+PyMuPDF pages into units so the old structure.py, pageparts.py, and treatise.py
+can work without modification.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 
 import fitz  # PyMuPDF
 
+logger = logging.getLogger(__name__)
 
-def parse_pdf(data: bytes) -> dict:
-    """Parse PDF bytes into a structured document representation."""
+
+def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300) -> dict:
+    """Parse PDF bytes into a structured document representation.
+
+    Args:
+        data: PDF file bytes.
+        use_ocr: If True, use Tesseract OCR for pages with no text layer.
+        ocr_dpi: Resolution for OCR rendering.
+    """
     doc = fitz.open(stream=data, filetype="pdf")
     pages = []
+    ocr_count = 0
+
     for page_num in range(len(doc)):
         page = doc[page_num]
         text = page.get_text("text").strip()
         images = page.get_images(full=True)
+
+        # If no text layer and OCR is enabled, try OCR
+        if not text and use_ocr:
+            from worker.prep import ocr
+            text = ocr.ocr_page(page, dpi=ocr_dpi)
+            if text:
+                ocr_count += 1
+                logger.info("OCR used for page %d: %d chars", page_num + 1, len(text))
+
         pages.append(
             {
                 "page": page_num + 1,
@@ -28,8 +49,13 @@ def parse_pdf(data: bytes) -> dict:
                 "images": len(images),
             }
         )
+
     metadata = doc.metadata or {}
     doc.close()
+
+    if ocr_count > 0:
+        logger.info("OCR used for %d of %d pages", ocr_count, len(pages))
+
     return {
         "format": "pdf",
         "pages": pages,
