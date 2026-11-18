@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 
@@ -55,9 +56,39 @@ class PrepWorker:
         self.coordinator_url = settings["coordinator_url"].rstrip("/")
         self.api_key = settings["api_key"]
         self.analyzer = analyzer if analyzer is not None else analyzer_from_settings(settings, http=self.http)
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_interval = int(settings.get("heartbeat_interval_seconds", 30))
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _start_job_heartbeat(self, job_id: str) -> None:
+        """Start a background thread that updates the worker heartbeat in Redis."""
+        self._heartbeat_stop.clear()
+
+        def _beat():
+            while not self._heartbeat_stop.is_set():
+                try:
+                    self.redis.set(
+                        f"worker:heartbeat:{self.worker_id}",
+                        json.dumps({"job_id": job_id, "ts": time.time()}),
+                        ex=self._heartbeat_interval * 4,
+                    )
+                except Exception as e:
+                    logger.warning("Heartbeat update failed: %s", e)
+                self._heartbeat_stop.wait(self._heartbeat_interval)
+
+        self._heartbeat_thread = threading.Thread(target=_beat, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _stop_job_heartbeat(self) -> None:
+        """Stop the background heartbeat thread."""
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=5)
+            self._heartbeat_thread = None
+        self.redis.delete(f"worker:heartbeat:{self.worker_id}")
 
     def check_cancelled(self, job_id: str) -> None:
         """Check if a job has been cancelled. Raises JobCancelled if so."""
@@ -157,6 +188,13 @@ class PrepWorker:
         input_url = job["input_url"]
 
         logger.info("Processing job %s (%s)", job_id, input_format)
+        self._start_job_heartbeat(job_id)
+        try:
+            return self._process_job_inner(job, job_id, input_format, input_url)
+        finally:
+            self._stop_job_heartbeat()
+
+    def _process_job_inner(self, job: dict, job_id: str, input_format: str, input_url: str) -> dict:
         self.check_cancelled(job_id)
         self.mark_in_progress(job_id)
         self.report_progress(job_id, {"stage": "downloading", "percent": 0})
