@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 def ocr_page(page, dpi: int = 300, language: str = "eng") -> dict:
     """Extract text from a single PyMuPDF page using Tesseract OCR.
 
+    Uses Tesseract's built-in block/paragraph/line structure to preserve
+    line breaks, so downstream normalization (header/footer detection,
+    paragraph breaks) has layout to work with.
+
     Args:
         page: A PyMuPDF page object.
         dpi: Resolution for rendering the page image.
@@ -25,7 +29,7 @@ def ocr_page(page, dpi: int = 300, language: str = "eng") -> dict:
 
     Returns:
         Dictionary with:
-            - text: extracted text
+            - text: extracted text with line breaks preserved
             - confidence: mean word confidence (0-100)
             - words: total word count
             - low_conf_words: count of words with confidence < 60
@@ -36,11 +40,11 @@ def ocr_page(page, dpi: int = 300, language: str = "eng") -> dict:
         img_data = mat.tobytes("png")
         img = Image.open(io.BytesIO(img_data))
 
-        # Run Tesseract OCR with data output for confidence scores
+        # Run Tesseract OCR with data output for confidence scores and structure
         data = pytesseract.image_to_data(img, lang=language, output_type=pytesseract.Output.DICT)
 
-        # Extract text and confidence
-        text_parts = []
+        # Collect words with their structural identifiers
+        words = []
         confidences = []
         low_conf_count = 0
 
@@ -52,15 +56,55 @@ def ocr_page(page, dpi: int = 300, language: str = "eng") -> dict:
             confidences.append(conf)
             if conf < 60:
                 low_conf_count += 1
-            text_parts.append(text)
+            words.append({
+                "text": text,
+                "block": data["block_num"][i],
+                "par": data["par_num"][i],
+                "line": data["line_num"][i],
+                "word": data["word_num"][i],
+                "top": data["top"][i],
+                "left": data["left"][i],
+            })
 
-        text = " ".join(text_parts)
+        if not words:
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "words": 0,
+                "low_conf_words": 0,
+            }
+
+        # Group words by (block, par, line) — Tesseract's own line detection.
+        # Within each line, sort by word_num (Tesseract's reading order).
+        # Lines are ordered by their top position (first word's top).
+        from collections import OrderedDict
+
+        lines = OrderedDict()
+        for w in words:
+            key = (w["block"], w["par"], w["line"])
+            if key not in lines:
+                lines[key] = {"words": [], "top": w["top"]}
+            lines[key]["words"].append(w)
+
+        # Sort words within each line by word_num (reading order)
+        for line in lines.values():
+            line["words"].sort(key=lambda w: w["word"])
+
+        # Sort lines by vertical position (top of first word)
+        sorted_lines = sorted(lines.values(), key=lambda l: l["top"])
+
+        # Build text: join words within a line with spaces, lines with newlines
+        text_lines = []
+        for line in sorted_lines:
+            text_lines.append(" ".join(w["text"] for w in line["words"]))
+        text = "\n".join(text_lines)
+
         mean_conf = sum(confidences) / len(confidences) if confidences else 0.0
 
         return {
             "text": text.strip(),
             "confidence": round(mean_conf, 1),
-            "words": len(text_parts),
+            "words": len(words),
             "low_conf_words": low_conf_count,
         }
     except Exception as e:
