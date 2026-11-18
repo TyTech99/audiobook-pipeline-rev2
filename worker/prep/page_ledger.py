@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from worker.prep import frontmatter as fm
+
 
 def build_page_ledger(
     source_format: str,
@@ -14,28 +16,31 @@ def build_page_ledger(
     """Build a page ledger from parsed pages and detected chapters."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Classify frontmatter/backmatter pages
+    fm_sections = fm.classify_frontmatter(pages)
+
     if source_format == "pdf":
         entries = []
         for page in pages:
             action, reason = page.get("action", "kept"), page.get("reason", "body text")
-            section = _find_section(chapters, page["page"])
+            page_num = page["page"]
+
+            # Frontmatter/backmatter takes precedence over chapter assignment
+            if page_num in fm_sections:
+                section = fm_sections[page_num]
+                reason = fm.get_frontmatter_reason(section)
+            else:
+                section = _find_section(chapters, page_num)
+
             entries.append(
                 {
-                    "page": page["page"],
+                    "page": page_num,
                     "action": action,
                     "reason": reason,
                     "section": section,
                 }
             )
-        structure = [
-            {
-                "section": ch["section"],
-                "number": ch["number"],
-                "title": ch["title"],
-                "pages": ch["pages"],
-            }
-            for ch in chapters
-        ]
+        structure = _build_structure(chapters, fm_sections, pages)
         ledger = {
             "source_format": "pdf",
             "source_file": source_file,
@@ -48,24 +53,23 @@ def build_page_ledger(
         entries = []
         for page in pages:
             action, reason = page.get("action", "kept"), page.get("reason", "body text")
-            section = _find_section(chapters, page["page"])
+            page_num = page["page"]
+
+            if page_num in fm_sections:
+                section = fm_sections[page_num]
+                reason = fm.get_frontmatter_reason(section)
+            else:
+                section = _find_section(chapters, page_num)
+
             entries.append(
                 {
-                    "item": page.get("item", f"page-{page['page']}"),
+                    "item": page.get("item", f"page-{page_num}"),
                     "action": action,
                     "reason": reason,
                     "section": section,
                 }
             )
-        structure = [
-            {
-                "section": ch["section"],
-                "number": ch["number"],
-                "title": ch["title"],
-                "items": [p.get("item", f"page-{p}") for p in ch["pages"]],
-            }
-            for ch in chapters
-        ]
+        structure = _build_structure(chapters, fm_sections, pages, item_mode=True)
         ledger = {
             "source_format": "epub",
             "source_file": source_file,
@@ -88,6 +92,47 @@ def build_page_ledger(
         "skipped_breakdown": breakdown,
     }
     return ledger
+
+
+def _build_structure(
+    chapters: list[dict],
+    fm_sections: dict[int, str],
+    pages: list[dict],
+    item_mode: bool = False,
+) -> list[dict]:
+    """Build the structure array including frontmatter/backmatter sections."""
+    structure = []
+
+    # Add frontmatter sections (in page order)
+    fm_by_section: dict[str, list[int]] = {}
+    for page_num, section in sorted(fm_sections.items()):
+        fm_by_section.setdefault(section, []).append(page_num)
+
+    for section, page_nums in fm_by_section.items():
+        entry: dict = {
+            "section": section,
+            "title": fm.get_frontmatter_reason(section).title(),
+        }
+        if item_mode:
+            entry["items"] = [p.get("item", f"page-{n}") for p, n in zip(pages, page_nums) if p["page"] == n]
+        else:
+            entry["pages"] = page_nums
+        structure.append(entry)
+
+    # Add chapter sections
+    for ch in chapters:
+        entry: dict = {
+            "section": ch["section"],
+            "number": ch["number"],
+            "title": ch["title"],
+        }
+        if item_mode:
+            entry["items"] = [p.get("item", f"page-{p}") for p in ch["pages"]]
+        else:
+            entry["pages"] = ch["pages"]
+        structure.append(entry)
+
+    return structure
 
 
 def _find_section(chapters: list[dict], page_num: int) -> str:
