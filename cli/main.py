@@ -99,6 +99,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
         cmd = csub.add_parser(name)
         if name != "uninstall":
             cmd.add_argument("--state", required=True)
+            cmd.add_argument("--force", action="store_true", help="Force redeploy even if unchanged")
         else:
             cmd.add_argument("--purge", action="store_true")
     update = csub.add_parser("update")
@@ -109,6 +110,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
     for name in ("install", "apply"):
         cmd = nsub.add_parser(name)
         cmd.add_argument("--state", required=True)
+        cmd.add_argument("--force", action="store_true", help="Force redeploy even if unchanged")
     nupdate = nsub.add_parser("update")
     nupdate.add_argument("--source", required=True)
     nun = nsub.add_parser("uninstall")
@@ -128,6 +130,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
     ssub = standalone.add_subparsers(dest="action", required=True)
     sinstall = ssub.add_parser("install")
     sinstall.add_argument("--state", required=True)
+    sinstall.add_argument("--force", action="store_true", help="Force redeploy even if unchanged")
 
     args = parser.parse_args(argv)
     host = host if host is not None else detect_host()
@@ -135,17 +138,17 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
     messages: list[str] = []
 
     if args.group == "coordinator" and args.action == "install":
-        payload = install_coordinator(host, load_state(args.state), messages)
+        payload = install_coordinator(host, load_state(args.state), messages, force=args.force)
     elif args.group == "coordinator" and args.action == "apply":
-        payload = apply_coordinator(host, load_state(args.state), messages)
+        payload = apply_coordinator(host, load_state(args.state), messages, force=args.force)
     elif args.group == "coordinator" and args.action == "update":
         payload = update_role(host, args.source, "coordinator", messages)
     elif args.group == "coordinator" and args.action == "uninstall":
         payload = uninstall_coordinator(host, args.purge, messages)
     elif args.group == "node" and args.action == "install":
-        payload = install_node(host, load_state(args.state), api, messages)
+        payload = install_node(host, load_state(args.state), api, messages, force=args.force)
     elif args.group == "node" and args.action == "apply":
-        payload = apply_node(host, load_state(args.state), api, messages)
+        payload = apply_node(host, load_state(args.state), api, messages, force=args.force)
     elif args.group == "node" and args.action == "update":
         payload = update_role(host, args.source, "node", messages)
     elif args.group == "node" and args.action == "uninstall":
@@ -167,7 +170,7 @@ def main(argv: list[str] | None = None, host=None, api=None) -> int:
             messages.append(str(exc))
             payload = {"code": 3}
     elif args.group == "standalone" and args.action == "install":
-        payload = install_standalone(host, load_state(args.state), api, messages)
+        payload = install_standalone(host, load_state(args.state), api, messages, force=args.force)
     else:
         payload = {"code": 2}
         messages.append("unsupported command")

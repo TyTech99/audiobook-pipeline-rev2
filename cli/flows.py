@@ -192,7 +192,7 @@ def _guard_urls(state: dict, api_url: str, redis_host: str) -> int | None:
     return None
 
 
-def install_coordinator(host, state: dict, messages: list[str]) -> dict:
+def install_coordinator(host, state: dict, messages: list[str], force: bool = False) -> dict:
     blocked = _check_linux_coordinator(host)
     if blocked:
         return {"code": blocked, "changed": False}
@@ -207,9 +207,11 @@ def install_coordinator(host, state: dict, messages: list[str]) -> dict:
     text = dump_env(rendered)
     unit = _coordinator_unit(paths["coordinator_prefix"])
     same = host.read(paths["coordinator_env"]) == text and paths["coordinator_unit"] in host.units
-    if same:
+    if same and not force:
         messages.append("coordinator unchanged")
         return {"code": EXIT_OK, "changed": False}
+    if same and force:
+        messages.append("coordinator unchanged (forced redeploy)")
     host.install_packages(coordinator_packages(state))
     host.write(paths["coordinator_env"], text)
     host.write(paths["coordinator_prefix"] + "/REVISION", "installed")
@@ -219,11 +221,11 @@ def install_coordinator(host, state: dict, messages: list[str]) -> dict:
     return {"code": EXIT_OK, "changed": True}
 
 
-def apply_coordinator(host, state: dict, messages: list[str]) -> dict:
-    return install_coordinator(host, state, messages)
+def apply_coordinator(host, state: dict, messages: list[str], force: bool = False) -> dict:
+    return install_coordinator(host, state, messages, force=force)
 
 
-def install_node(host, state: dict, api, messages: list[str]) -> dict:
+def install_node(host, state: dict, api, messages: list[str], force: bool = False) -> dict:
     if not host.is_root():
         return {"code": EXIT_PRECONDITION, "changed": False}
     windows = host.os_name == "windows"
@@ -257,9 +259,11 @@ def install_node(host, state: dict, api, messages: list[str]) -> dict:
     same = host.read(env_path) == text and (
         (windows and unit_name in host.tasks) or (not windows and unit_name in host.units)
     )
-    if same:
+    if same and not force:
         messages.append("node unchanged")
         return {"code": EXIT_OK, "changed": False}
+    if same and force:
+        messages.append("node unchanged (forced redeploy)")
     host.install_packages(packages)
     host.write(env_path, text)
     host.write(paths["node_prefix"] + "/REVISION", "installed")
@@ -275,11 +279,11 @@ def install_node(host, state: dict, api, messages: list[str]) -> dict:
     return {"code": EXIT_OK, "changed": True}
 
 
-def apply_node(host, state: dict, api, messages: list[str]) -> dict:
+def apply_node(host, state: dict, api, messages: list[str], force: bool = False) -> dict:
     paths = windows_paths() if host.os_name == "windows" else linux_paths()
     before = host.read(paths["node_env"])
     restarts_before = len(host.restarts)
-    result = install_node(host, state, api, messages)
+    result = install_node(host, state, api, messages, force=force)
     if result["code"] != EXIT_OK:
         return result
     after = host.read(paths["node_env"])
@@ -360,12 +364,12 @@ def _wait_for_coordinator(api, url: str, timeout: int = 120, interval: int = 2) 
     return False
 
 
-def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
+def install_standalone(host, state: dict, api, messages: list[str], force: bool = False) -> dict:
     coordinator_state = dict(state)
     coordinator_state.setdefault("api_url", "http://127.0.0.1:8000/api/v1")
     coordinator_state.setdefault("redis_bind", "127.0.0.1")
     coordinator_state.setdefault("redis_advertise", "127.0.0.1")
-    result = install_coordinator(host, coordinator_state, messages)
+    result = install_coordinator(host, coordinator_state, messages, force=force)
     if result["code"] != EXIT_OK:
         return result
     env = parse_env(host.read(linux_paths()["coordinator_env"]))
@@ -409,7 +413,7 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
             "working_hours": node_state["working_hours"],
         },
     )
-    node_result = install_node(host, node_state, api, messages)
+    node_result = install_node(host, node_state, api, messages, force=force)
     node_result["invited"] = True
     return node_result
 
