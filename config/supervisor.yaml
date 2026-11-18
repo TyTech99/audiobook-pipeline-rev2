@@ -34,10 +34,10 @@ llm:
 docker:
   socket: "/var/run/docker.sock"
   images:
-    prep: "${PREP_IMAGE:-audiobook-worker-prep:local}"
-    tts: "${TTS_IMAGE:-audiobook-worker-tts:local}"
-    recipe: "${RECIPE_IMAGE:-audiobook-recipe-michael:local}"
-    probe: "${PROBE_IMAGE:-audiobook-probe:dev}"
+    prep: "audiobook-worker-prep:local"
+    tts: "audiobook-worker-tts:local"
+    recipe: "audiobook-recipe-michael:local"
+    probe: "audiobook-probe:dev"
 
 working_hours:
   enabled: true
