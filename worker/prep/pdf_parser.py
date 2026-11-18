@@ -1,4 +1,10 @@
-"""Pure functions for PDF parsing. No I/O, no Redis, no Docker."""
+"""PDF parsing: PyMuPDF extraction + old pipeline's unit-based structure detection.
+
+The new pipeline uses PyMuPDF for text extraction (no poppler dependency).
+The old pipeline's structure detection works on "units" (pages with layout text
+and geometry). We convert PyMuPDF pages into units so the old structure.py,
+pageparts.py, and treatise.py can work without modification.
+"""
 
 from __future__ import annotations
 
@@ -37,6 +43,32 @@ def parse_pdf(data: bytes) -> dict:
     }
 
 
+def pages_to_units(pages: list[dict]) -> list[dict]:
+    """Convert PyMuPDF pages into the old pipeline's unit format.
+
+    Each unit is a dict with:
+      - pdf_page: 1-based page number
+      - half: None (we don't split landscape pages yet)
+      - text: the page text (layout preserved by PyMuPDF)
+      - geom: None (no line geometry from PyMuPDF text extraction)
+      - normalized: {}
+
+    The old structure.py and pageparts.py work with units. They use
+    unit["text"].split("\\n") for line-based analysis and unit["geom"]
+    for line positions (optional — they handle None).
+    """
+    units = []
+    for p in pages:
+        units.append({
+            "pdf_page": p["page"],
+            "half": None,
+            "text": p["text"],
+            "geom": None,
+            "normalized": {},
+        })
+    return units
+
+
 def classify_page(page: dict) -> tuple[str, str]:
     """Classify a single page. Returns (action, reason)."""
     text = page["text"]
@@ -64,7 +96,49 @@ def classify_page(page: dict) -> tuple[str, str]:
 
 
 def detect_chapters(pages: list[dict]) -> list[dict]:
-    """Detect chapter boundaries from classified pages."""
+    """Detect chapter boundaries using the old pipeline's structure detection.
+
+    Falls back to the naive regex if the old pipeline's detection fails
+    (e.g., no units available).
+    """
+    from worker.prep import structure
+
+    units = pages_to_units(pages)
+    try:
+        heads = structure.find_headings(units)
+        if heads:
+            chapters = []
+            for k, h in enumerate(heads):
+                if k + 1 < len(heads):
+                    nh = heads[k + 1]
+                    last_unit = nh["unit"] - 1
+                else:
+                    last_unit = len(units) - 1
+                title = h.get("title") or f"Chapter {h['number']}"
+                ch = {
+                    "number": h["number"],
+                    "title": title,
+                    "section": f"chapter-{h['number']}",
+                    "start_page": units[h["unit"]]["pdf_page"],
+                    "end_page": units[last_unit]["pdf_page"],
+                    "pages": [units[i]["pdf_page"] for i in range(h["unit"], last_unit + 1)],
+                }
+                if h.get("label"):
+                    ch["label"] = h["label"]
+                if h.get("synthetic"):
+                    ch["synthetic"] = True
+                chapters.append(ch)
+            if chapters:
+                return chapters
+    except Exception:
+        pass
+
+    # Fallback: naive regex detection
+    return _detect_chapters_naive(pages)
+
+
+def _detect_chapters_naive(pages: list[dict]) -> list[dict]:
+    """Naive chapter detection (original implementation)."""
     chapters = []
     current_chapter = None
     chapter_re = re.compile(
