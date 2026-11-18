@@ -73,6 +73,7 @@ class DockerProbeRunner(ProbeRunner):
             "environment": env,
             "restart_policy": {"Name": "no"},
             "volumes": volumes,
+            "network_mode": "host",
         }
         if extra_devices:
             kwargs["devices"] = extra_devices
