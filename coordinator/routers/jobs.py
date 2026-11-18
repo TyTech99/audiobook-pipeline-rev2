@@ -5,7 +5,7 @@ from psycopg import Connection
 
 from coordinator.auth import Principal, get_conn, get_principal, require_operator
 from coordinator.errors import ApiError
-from coordinator.routers.schemas import JobCompleteIn, JobProgressIn, JobSubmitIn
+from coordinator.routers.schemas import JobCompleteIn, JobProgressIn, JobStartIn, JobSubmitIn
 from coordinator.services import jobs as job_service
 
 router = APIRouter()
@@ -87,6 +87,16 @@ def report_progress(
     conn: Connection = Depends(get_conn),
 ):
     return job_service.report_progress(conn, job_id, body.model_dump(), principal.node_id)
+
+
+@router.post("/{job_id}/start")
+def start_job(
+    job_id: UUID,
+    body: JobStartIn,
+    principal: Principal = Depends(_node_principal),
+    conn: Connection = Depends(get_conn),
+):
+    return job_service.mark_in_progress(conn, job_id, body.worker_id, body.stage)
 
 
 def _any_principal(principal: Principal = Depends(get_principal)) -> Principal:

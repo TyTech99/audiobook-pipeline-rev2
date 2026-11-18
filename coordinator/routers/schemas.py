@@ -74,6 +74,11 @@ class JobProgressIn(BaseModel):
     message: str | None = None
 
 
+class JobStartIn(BaseModel):
+    worker_id: str
+    stage: str = "prep"
+
+
 class JobCompleteIn(BaseModel):
     package_url: str | None = None
     output_url: str | None = None
