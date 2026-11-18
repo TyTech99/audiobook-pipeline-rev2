@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -22,6 +23,8 @@ from worker.prep.metadata_enrich import enrich_metadata
 from worker.prep.narrator_script import build_narrator_script, validate_script
 from worker.prep.page_ledger import build_page_ledger, validate_page_ledger
 from worker.prep.pdf_parser import classify_page, detect_chapters, parse_pdf
+
+logger = logging.getLogger("worker.prep")
 
 
 class PrepWorker:
@@ -85,27 +88,37 @@ class PrepWorker:
         input_format = job["input_format"]
         input_url = job["input_url"]
 
+        logger.info("Processing job %s (%s)", job_id, input_format)
+        logger.info("Downloading input: %s", input_url)
         data = download_bytes(input_url, http_client=self.http)
+        logger.info("Downloaded %d bytes", len(data))
 
         if input_format == "pdf":
+            logger.info("Parsing PDF...")
             doc = parse_pdf(data)
+            logger.info("Parsed %d pages", doc["total_pages"])
             for page in doc["pages"]:
                 action, reason = classify_page(page)
                 page["action"] = action
                 page["reason"] = reason
         else:
+            logger.info("Parsing EPUB...")
             doc = parse_epub(data)
+            logger.info("Parsed %d items", doc["total_pages"])
             for page in doc["pages"]:
                 action, reason = classify_epub_item(page)
                 page["action"] = action
                 page["reason"] = reason
 
+        logger.info("Detecting chapters...")
         chapters = detect_chapters(doc["pages"])
+        logger.info("Detected %d chapters", len(chapters))
         metadata = doc["metadata"]
         title = metadata.get("title") or job.get("metadata", {}).get("title") or "Unknown Title"
         author = metadata.get("author") or job.get("metadata", {}).get("author") or "Unknown Author"
         language = job.get("metadata", {}).get("language") or "en"
 
+        logger.info("Enriching metadata...")
         metadata = enrich_metadata(
             {
                 "title": title,
@@ -119,13 +132,16 @@ class PrepWorker:
         title = metadata.get("title") or title
         author = metadata.get("author") or author
 
+        logger.info("Getting cover...")
         cover_bytes, cover_source = get_cover(data, input_format, title, author, http=self.http)
 
+        logger.info("Building page ledger...")
         ledger = build_page_ledger(input_format, input_url, doc["pages"], chapters)
         ledger_errors = validate_page_ledger(ledger, doc["total_pages"])
         if ledger_errors:
             raise ValueError(f"Page ledger validation failed: {ledger_errors}")
 
+        logger.info("Building narrator script...")
         script = build_narrator_script(
             job_id, input_format, input_url, title, author, language, doc["pages"], chapters
         )
@@ -133,6 +149,7 @@ class PrepWorker:
         if script_errors:
             raise ValueError(f"Script validation failed: {script_errors}")
 
+        logger.info("Building EPUB...")
         epub_data = build_epub(title, author, language, doc["pages"], chapters)
 
         package = {
@@ -250,6 +267,20 @@ def main() -> None:
     with open(path) as f:
         raw = _expand_env(yaml.safe_load(f))
     settings = flatten_worker_settings(raw)
+
+    # Setup logging
+    log_level = settings.get("log_level", "INFO").upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S",
+        stream=sys.stdout,
+    )
+
+    logger.info("Starting prep worker (config=%s)", path)
+    logger.info("Node ID: %s", settings.get("node_id"))
+    logger.info("Coordinator: %s", settings.get("coordinator_url"))
+
     worker = PrepWorker(settings)
     worker.run()
 
