@@ -184,7 +184,16 @@ class TTSWorker:
                 continue
             jobs_processed += 1
             try:
-                self.heartbeat(job["job_id"])
+                job_id = job["job_id"]
+                # Fetch full job details from coordinator (queue only has job_id + type)
+                response = self.http.get(
+                    f"{self.coordinator_url}/jobs/{job_id}",
+                    headers=self._headers(),
+                    timeout=10,
+                )
+                response.raise_for_status()
+                job = response.json()
+                self.heartbeat(job_id)
                 self.process_job(job)
             except Exception as exc:
                 try:
@@ -201,10 +210,12 @@ class TTSWorker:
 def _expand_env(value):
     import re
 
-    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}")
 
     def repl(match):
-        return os.environ.get(match.group(1), "")
+        var = match.group(1)
+        default = match.group(3)
+        return os.environ.get(var, default if default is not None else "")
 
     if isinstance(value, str):
         return pattern.sub(repl, value)

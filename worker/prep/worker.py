@@ -309,10 +309,12 @@ class PrepWorker:
 def _expand_env(value):
     import re
 
-    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    pattern = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}")
 
     def repl(match):
-        return os.environ.get(match.group(1), "")
+        var = match.group(1)
+        default = match.group(3)
+        return os.environ.get(var, default if default is not None else "")
 
     if isinstance(value, str):
         return pattern.sub(repl, value)
