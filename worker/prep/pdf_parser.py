@@ -17,7 +17,7 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 
-def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None, llm_client=None, language: str = "eng") -> dict:
+def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None, llm_client=None, language: str = "eng", ocr_settings=None) -> dict:
     """Parse PDF bytes into a structured document representation.
 
     Args:
@@ -27,7 +27,13 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
         progress_callback: Optional callable(page_num, total_pages) for progress updates.
         llm_client: Optional LLM client for cleaning up low-quality OCR pages.
         language: Language code for OCR and dictionary checking.
+        ocr_settings: Optional OcrQualitySettings from config.
     """
+    from worker.prep.ocr_cleanup import OcrQualitySettings
+
+    if ocr_settings is None:
+        ocr_settings = OcrQualitySettings()
+
     doc = fitz.open(stream=data, filetype="pdf")
     pages = []
     ocr_count = 0
@@ -50,10 +56,10 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
 
             if text:
                 ocr_count += 1
-                ocr_quality = ocr_cleanup.judge_ocr_quality(ocr_result, language)
+                ocr_quality = ocr_cleanup.judge_ocr_quality(ocr_result, ocr_settings)
 
                 # If quality is poor and we have an LLM client, try cleanup
-                if not ocr_quality["passed"] and llm_client:
+                if not ocr_quality["passed"] and llm_client and ocr_settings.llm_cleanup_enabled:
                     logger.info(
                         "Page %d OCR quality poor (%s), attempting LLM cleanup",
                         page_num + 1,
@@ -64,7 +70,7 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
                     try:
                         cleaned = asyncio.run(
                             ocr_cleanup.cleanup_page_with_llm(
-                                llm_client, page_num + 1, text, ocr_quality, language
+                                llm_client, page_num + 1, text, ocr_quality, ocr_settings
                             )
                         )
                         if cleaned != text:
@@ -80,7 +86,7 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
                     len(text),
                     ocr_quality["confidence"],
                     ocr_quality["dict_share"],
-                    f" (LLM cleaned)" if llm_cleanup_count > 0 else "",
+                    " (LLM cleaned)" if llm_cleanup_count > 0 else "",
                 )
 
         pages.append(

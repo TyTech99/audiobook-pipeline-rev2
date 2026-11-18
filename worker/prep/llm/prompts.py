@@ -38,19 +38,3 @@ def build_user_prompt(
         f"Known voice recipes (prefer these ids when suggesting): {recipe_line}\n\n"
         f"Book sample text:\n{sample}\n"
     )
-
-
-OCR_CLEANUP_SYSTEM_PROMPT = """You are an OCR text cleanup specialist. Your job is to fix OCR errors in extracted book text while preserving the original meaning and wording.
-
-Common OCR errors to fix:
-- Misrecognized characters (e.g., '1' instead of 'l', '0' instead of 'O', 'rn' instead of 'm')
-- Broken hyphens at line ends (rejoin words split across lines: "star-\\nvation" → "starvation")
-- Random page breaks and headers/footers (remove page numbers, running titles, chapter headers repeated on each page)
-- Garbage characters and symbols that don't belong
-- Spacing errors (missing or extra spaces)
-
-Rules:
-- Preserve the original wording and meaning as much as possible
-- Do NOT add content that isn't in the original
-- Do NOT rewrite or paraphrase — only fix OCR artifacts
-- Return ONLY the cleaned text, no explanations or markdown"""

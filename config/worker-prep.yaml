@@ -52,6 +52,35 @@ pdf:
   text_extraction: "pymupdf"
   image_dpi: 300
 
+ocr:
+  enabled: true
+  dpi: 300
+  language: "eng"
+  # Quality thresholds — pages below these are flagged for LLM cleanup
+  min_confidence: 85.0
+  min_dict_share: 0.90
+  min_chars: 10
+  # LLM cleanup for low-quality OCR pages
+  llm_cleanup:
+    enabled: true
+    temperature: 0.1
+    max_tokens: 4096
+    system_prompt: |
+      You are an OCR text cleanup specialist. Your job is to fix OCR errors in extracted book text while preserving the original meaning and wording.
+
+      Common OCR errors to fix:
+      - Misrecognized characters (e.g., '1' instead of 'l', '0' instead of 'O', 'rn' instead of 'm')
+      - Broken hyphens at line ends (rejoin words split across lines: "star-\nvation" → "starvation")
+      - Random page breaks and headers/footers (remove page numbers, running titles, chapter headers repeated on each page)
+      - Garbage characters and symbols that don't belong
+      - Spacing errors (missing or extra spaces)
+
+      Rules:
+      - Preserve the original wording and meaning as much as possible
+      - Do NOT add content that isn't in the original
+      - Do NOT rewrite or paraphrase — only fix OCR artifacts
+      - Return ONLY the cleaned text, no explanations or markdown
+
 epub:
   max_files: 1000
   preserve_images: true

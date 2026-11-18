@@ -122,6 +122,10 @@ class PrepWorker:
             llm_client = None
             if hasattr(self.analyzer, "client"):
                 llm_client = self.analyzer.client
+            # Get OCR settings from config
+            from worker.prep.ocr_cleanup import OcrQualitySettings
+
+            ocr_settings = OcrQualitySettings.from_config(self.settings)
             doc = parse_pdf(
                 data,
                 progress_callback=lambda page, total: self.report_progress(
@@ -135,6 +139,7 @@ class PrepWorker:
                 ) if page % 10 == 0 else None,
                 llm_client=llm_client,
                 language=job.get("metadata", {}).get("language") or "eng",
+                ocr_settings=ocr_settings,
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.report_progress(job_id, {"phase": "classifying", "percent": 45})
