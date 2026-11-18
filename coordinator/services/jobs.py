@@ -172,8 +172,8 @@ def mark_in_progress(conn: Connection, job_id, worker_id: str, stage: str) -> di
     phase_data["worker_id"] = worker_id
     phase_data["started_at"] = iso(now)
     conn.execute(
-        "UPDATE jobs SET status = %s, %s = %s, updated_at = %s WHERE job_id = %s",
-        (new_status, phase, Json(phase_data), now, job_id),
+        f"UPDATE jobs SET status = %s, {phase} = %s, updated_at = %s WHERE job_id = %s",
+        (new_status, Json(phase_data), now, job_id),
     )
     return {"status": "ok"}
 
