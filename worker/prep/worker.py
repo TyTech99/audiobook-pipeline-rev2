@@ -76,6 +76,25 @@ class PrepWorker:
         )
         response.raise_for_status()
 
+    def mark_in_progress(self, job_id: str) -> None:
+        response = self.http.post(
+            f"{self.coordinator_url}/jobs/{job_id}/start",
+            headers=self._headers(),
+            json={"worker_id": self.worker_id, "stage": "prep"},
+        )
+        response.raise_for_status()
+
+    def report_progress(self, job_id: str, progress: dict) -> None:
+        try:
+            response = self.http.post(
+                f"{self.coordinator_url}/jobs/{job_id}/progress",
+                headers=self._headers(),
+                json=progress,
+            )
+            response.raise_for_status()
+        except Exception as e:
+            logger.warning("Failed to report progress for %s: %s", job_id, e)
+
     def claim_job(self, timeout: int = 30) -> dict | None:
         result = self.redis.brpop(["prep"], timeout=timeout)
         if result is None:
@@ -89,14 +108,27 @@ class PrepWorker:
         input_url = job["input_url"]
 
         logger.info("Processing job %s (%s)", job_id, input_format)
+        self.mark_in_progress(job_id)
+        self.report_progress(job_id, {"phase": "downloading", "percent": 0})
+
         logger.info("Downloading input: %s", input_url)
         data = download_bytes(input_url, http_client=self.http)
         logger.info("Downloaded %d bytes", len(data))
+        self.report_progress(job_id, {"phase": "parsing", "percent": 5})
 
         if input_format == "pdf":
             logger.info("Parsing PDF...")
-            doc = parse_pdf(data)
+            doc = parse_pdf(data, progress_callback=lambda page, total: self.report_progress(
+                job_id,
+                {
+                    "phase": "ocr",
+                    "page": page,
+                    "total_pages": total,
+                    "percent": 5 + int((page / total) * 40),
+                },
+            ) if page % 10 == 0 else None)
             logger.info("Parsed %d pages", doc["total_pages"])
+            self.report_progress(job_id, {"phase": "classifying", "percent": 45})
             for page in doc["pages"]:
                 action, reason = classify_page(page)
                 page["action"] = action
@@ -105,6 +137,7 @@ class PrepWorker:
             logger.info("Parsing EPUB...")
             doc = parse_epub(data)
             logger.info("Parsed %d items", doc["total_pages"])
+            self.report_progress(job_id, {"phase": "classifying", "percent": 45})
             for page in doc["pages"]:
                 action, reason = classify_epub_item(page)
                 page["action"] = action
@@ -113,12 +146,14 @@ class PrepWorker:
         logger.info("Detecting chapters...")
         chapters = detect_chapters(doc["pages"])
         logger.info("Detected %d chapters", len(chapters))
+        self.report_progress(job_id, {"phase": "chapters", "percent": 50, "chapters": len(chapters)})
         metadata = doc["metadata"]
         title = metadata.get("title") or job.get("metadata", {}).get("title") or "Unknown Title"
         author = metadata.get("author") or job.get("metadata", {}).get("author") or "Unknown Author"
         language = job.get("metadata", {}).get("language") or "en"
 
         logger.info("Enriching metadata...")
+        self.report_progress(job_id, {"phase": "metadata", "percent": 55})
         metadata = enrich_metadata(
             {
                 "title": title,
@@ -133,23 +168,28 @@ class PrepWorker:
         author = metadata.get("author") or author
 
         logger.info("Getting cover...")
+        self.report_progress(job_id, {"phase": "cover", "percent": 60})
         cover_bytes, cover_source = get_cover(data, input_format, title, author, http=self.http)
 
         logger.info("Building page ledger...")
+        self.report_progress(job_id, {"phase": "ledger", "percent": 65})
         ledger = build_page_ledger(input_format, input_url, doc["pages"], chapters)
         ledger_errors = validate_page_ledger(ledger, doc["total_pages"])
         if ledger_errors:
             raise ValueError(f"Page ledger validation failed: {ledger_errors}")
 
         logger.info("Building narrator script...")
+        self.report_progress(job_id, {"phase": "script", "percent": 70})
         script = build_narrator_script(
             job_id, input_format, input_url, title, author, language, doc["pages"], chapters
         )
         script_errors = validate_script(script, ledger)
         if script_errors:
             raise ValueError(f"Script validation failed: {script_errors}")
+        self.report_progress(job_id, {"phase": "script", "percent": 85, "segments": script["metadata"]["total_segments"]})
 
         logger.info("Building EPUB...")
+        self.report_progress(job_id, {"phase": "epub", "percent": 90})
         epub_data = build_epub(title, author, language, doc["pages"], chapters)
 
         package = {

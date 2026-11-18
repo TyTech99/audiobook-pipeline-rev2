@@ -17,19 +17,21 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 
-def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300) -> dict:
+def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None) -> dict:
     """Parse PDF bytes into a structured document representation.
 
     Args:
         data: PDF file bytes.
         use_ocr: If True, use Tesseract OCR for pages with no text layer.
         ocr_dpi: Resolution for OCR rendering.
+        progress_callback: Optional callable(page_num, total_pages) for progress updates.
     """
     doc = fitz.open(stream=data, filetype="pdf")
     pages = []
     ocr_count = 0
+    total_pages = len(doc)
 
-    for page_num in range(len(doc)):
+    for page_num in range(total_pages):
         page = doc[page_num]
         text = page.get_text("text").strip()
         images = page.get_images(full=True)
@@ -49,6 +51,10 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300) -> dict:
                 "images": len(images),
             }
         )
+
+        # Report progress every page (callback decides whether to actually report)
+        if progress_callback:
+            progress_callback(page_num + 1, total_pages)
 
     metadata = doc.metadata or {}
     doc.close()
