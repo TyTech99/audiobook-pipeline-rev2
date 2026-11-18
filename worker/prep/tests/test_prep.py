@@ -477,3 +477,171 @@ def test_check_cancelled_noop_when_flag_not_set():
 
     mock_redis.exists.assert_called_once_with("job:cancel:test-job")
     mock_redis.delete.assert_not_called()
+
+
+# --- Frontmatter detector tests ---
+
+def test_frontmatter_title_page():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH\n\nLONDON\nPUBLISHER"},
+        {"page": 2, "text": "Chapter 1\n\nThis is the first chapter with a lot of body text that makes it clearly not a title page. " * 5},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(1) == "frontmatter-title"
+    assert 2 not in result
+
+
+def test_frontmatter_copyright_page():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "Copyright 2026 by John Smith.\nAll rights reserved.\nISBN 978-0-306-40615-7.\nPrinted in Great Britain."},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(1) == "frontmatter-title"
+    assert result.get(2) == "frontmatter-copyright"
+
+
+def test_frontmatter_toc_page():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "CONTENTS\n\nIntroduction ............ 5\nChapter One ........... 10\nChapter Two ........... 25\nChapter Three ......... 40"},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(2) == "frontmatter-toc"
+
+
+def test_frontmatter_dedication():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "For my wife, who understood"},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(2) == "frontmatter-dedication"
+
+
+def test_frontmatter_preface():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "PREFACE\n\nI wrote this book because I wanted to share my story with the world. " * 5},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(2) == "frontmatter-preface"
+
+
+def test_frontmatter_not_detected_in_body():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "Chapter 1\n\nThis is body text. " * 20},
+        {"page": 3, "text": "Chapter 2\n\nMore body text. " * 20},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(1) == "frontmatter-title"
+    assert 2 not in result
+    assert 3 not in result
+
+
+def test_backmatter_index():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "Chapter 1\n\nBody text. " * 20},
+        {"page": 2, "text": "Chapter 2\n\nMore body text. " * 20},
+        {"page": 3, "text": "INDEX\n\nSmith, John ......... 1\nAdventure, The .... 5"},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(3) == "backmatter-index"
+
+
+def test_backmatter_bibliography():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "Chapter 1\n\nBody text. " * 20},
+        {"page": 2, "text": "BIBLIOGRAPHY\n\nSmith, J. (2020). The Great Adventure. Publisher."},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(2) == "backmatter-bibliography"
+
+
+def test_page_ledger_with_frontmatter():
+    from worker.prep.page_ledger import build_page_ledger
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH", "action": "kept", "reason": "body text"},
+        {"page": 2, "text": "Copyright 2026. All rights reserved.", "action": "kept", "reason": "body text"},
+        {"page": 3, "text": "Chapter 1\n\nBody text.", "action": "kept", "reason": "body text"},
+    ]
+    chapters = [
+        {"number": 1, "title": "Chapter 1", "section": "chapter-1", "start_page": 1, "end_page": 3, "pages": [1, 2, 3]},
+    ]
+    ledger = build_page_ledger("pdf", "test.pdf", pages, chapters)
+
+    # Page 1 should be title page, not chapter-1
+    assert ledger["pages"][0]["section"] == "frontmatter-title"
+    assert ledger["pages"][0]["reason"] == "title page"
+
+    # Page 2 should be copyright, not chapter-1
+    assert ledger["pages"][1]["section"] == "frontmatter-copyright"
+    assert ledger["pages"][1]["reason"] == "copyright"
+
+    # Page 3 should be chapter-1
+    assert ledger["pages"][2]["section"] == "chapter-1"
+
+    # Structure should include frontmatter sections
+    sections = [s["section"] for s in ledger["structure"]]
+    assert "frontmatter-title" in sections
+    assert "frontmatter-copyright" in sections
+    assert "chapter-1" in sections
+
+
+def test_unnumbered_section_detection():
+    from worker.prep.structure import find_headings
+
+    units = [
+        {"pdf_page": 1, "half": None, "text": "INTRODUCTION\n\nThe Historian's Testament\n\nThis book is based upon a larger work.", "geom": None, "normalized": {}},
+        {"pdf_page": 2, "half": None, "text": "More introduction text here.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER ONE\n\nThe Treaty of Versailles\n\nThe peace which ended the Great War.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "PART II\n\nThe War Years\n\nThe war began in 1939.", "geom": None, "normalized": {}},
+        {"pdf_page": 5, "half": None, "text": "More war text.", "geom": None, "normalized": {}},
+        {"pdf_page": 6, "half": None, "text": "EPILOGUE\n\nThe Aftermath\n\nThe war ended in 1945.", "geom": None, "normalized": {}},
+    ]
+    heads = find_headings(units)
+    assert len(heads) == 4
+    assert heads[0]["label"] == "Introduction"
+    assert heads[0]["title"] == "The Historian's Testament"
+    assert heads[1]["title"] == "The Treaty of Versailles"
+    assert heads[2]["label"] == "Part II"
+    assert heads[2]["title"] == "The War Years"
+    assert heads[3]["label"] == "Epilogue"
+    assert heads[3]["title"] == "The Aftermath"
+
+
+def test_unnumbered_section_with_chapters():
+    from worker.prep.structure import find_headings
+
+    units = [
+        {"pdf_page": 1, "half": None, "text": "PROLOGUE\n\nThe Beginning\n\nIt started on a cold winter night.", "geom": None, "normalized": {}},
+        {"pdf_page": 2, "half": None, "text": "CHAPTER 1\n\nThe First Day\n\nThe sun rose over the hills.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER 2\n\nThe Second Day\n\nThe journey continued.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "AFTERWORD\n\nReflections\n\nLooking back on the journey.", "geom": None, "normalized": {}},
+    ]
+    heads = find_headings(units)
+    assert len(heads) == 4
+    assert heads[0]["label"] == "Prologue"
+    assert heads[0]["title"] == "The Beginning"
+    assert heads[1]["title"] == "The First Day"
+    assert heads[2]["title"] == "The Second Day"
+    assert heads[3]["label"] == "Afterword"
+    assert heads[3]["title"] == "Reflections"

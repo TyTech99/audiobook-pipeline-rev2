@@ -38,6 +38,9 @@ class MemoryHost:
     def write(self, path: str, content: str) -> None:
         self.files[path] = content
 
+    def chmod(self, path: str, mode: int) -> None:
+        pass  # no-op in memory host
+
     def remove(self, path: str) -> None:
         self.files.pop(path, None)
 
