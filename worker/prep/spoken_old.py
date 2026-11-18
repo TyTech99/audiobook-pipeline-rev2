@@ -8,42 +8,143 @@
 """
 import re
 
-from pipeline.text import structure
+from worker.prep import structure
 
 # The check limits per job. Sentence counts and word limits are the instruction files' own (prompts/*.md).
 LIMITS = {
     "chapter_preview": {"min_sentences": 2, "max_sentences": 2, "max_words": 70},
-    "concept_summary": {"mig���W�_��J��I�H�B�P���U�H�K���\[J���\�\�����ٟ�]�������]�W��W�_�Y�W��B���Y��[�[��\�^
-N��HP���U���X�[X�HN�K�ܛ�\
-JH
-�����^���\
+    "concept_summary": {"min_sentences": 2, "max_sentences": 2, "max_words": 70},
+    "chapter_summary": {"min_sentences": 3, "max_sentences": 3, "max_words": 100},
+    "table_takeaway": {"min_sentences": 1, "max_sentences": 2, "max_words": 60},
+    "figure_sentence": {"min_sentences": 1, "max_sentences": 1, "max_words": 40},
+    "book_description": {"min_sentences": 3, "max_sentences": 5, "max_words": 120},
+}
+# Large table: above 4 rows or above 3 columns. Rows count the body rows, not the header.
+TABLE_MAX_ROWS = 4
+TABLE_MAX_COLUMNS = 3
 
-JB��]\���˜�\X�J�������H�܈�[��K��]
-���VˈO�JV���WWL�YL�NWJ����V����L�X�L�NO��KV�NWJH�
-HY�˜��\
+FIRST_PERSON = re.compile(r"\b(I|I'm|I've|I'd|I'll|me|my|mine|myself)\b")
+MARKDOWN = re.compile(r"(^\s*[-*+]\s|^\s*\d+[.)]\s|^#|\*\*|__|`|^\s*\||\[.*\]\(.*\))", re.M)
+SYMBOLS = re.compile(r"[#*_|<>{}\[\]~^=+@\\/%&$]")
+ABBREV = re.compile(r"\b(Mr|Mrs|Dr|St|Prof|Rev|Vol|No|vs|etc|e\.g|i\.e|Fig)\.")
 
-WB���Y��\][^�Y
-^
-N���]\���]
-�K��[�[
-����KV�V�K^�^̋W��^
-JB���Y��]�ۘ[Y\��]��\��K[��YJ
-JN������\][^�Y�ܙ�[��]]H��\��H�\����۝Z[�X]�[���]H�[�[��I���\���ܙ�[�]\[�ܙ[�\�H�ܙ
-��\��\�H��Y]�\�H[�H��\��H܈[�H[���\�]�[�K�������H��\��K���\�
-B���[�H�]
 
-B��܈�[��[�[��\��]
-N���\��H�K�X]�
-��ʊ�KV�K^�J�H��B��܈�[��\][^�Y
-�N��Y��\��[��OH�\���ܛ�\
-JN���۝[�YB���[��Y
-�B�[��YH�K���\�
-H�܈H[�[��YB��]\���ܝY
-��܈�[���[�Y�˛��\�
-H��[���[�˛��\�
-H��[�[��Y
-B���Y��X���؋�]��\��K[��YJ
-JN�����ۘ[YN��[Y_H\�	�\���[�	٘Z[Y	�
-H�[Y\�وH�Z[Y�X���K�����[HHSRU�ڛؗB��[��H�[�[��\��]
-B��[Y\�H�]�ۘ[Y\��]��\��K[��Y
-B��HȜ�[2���"�B���7G&����7F'G7v�F��'�"�f�"���Ɩ�W2����FVb'6U�F&�R�&���"""��VB�&�G���Ɨ7G2�b&�w2�b6V��2g&���&�F�v�F&�R��VBV�G�v�V�F�W&R�2��'V�RƖ�R��"" �&�w2���2�7G&���f�"2����7G&����7G&��'�"��7ƗB�'�"��f�"���&�7ƗB�%��"��b��7G&���Т'V�R��W�B���f�"��"��V�V�W&FR�&�w2��b"�B�&R�gV���F6��"#��׳"�ӣ�"�2�f�"2��"�b2������R���b'V�R�2���S��&WGW&����&�w0�&WGW&�&�w5��'V�U��&�w5�'V�R��Р��FVbF&�U�6��R�&����VB�&�G��'6U�F&�R�&��6��2������V�"�f�""���VB�&�G���"�Ґ�&WGW&��V�&�G���6��0���FVb�5��&vR�&���&�w2�6��2�F&�U�6��R�&��&WGW&�&�w2�D$�U����$�u2�"6��2�D$�U����4��T��0���FVb&VE�F&�R�&���""$6���F&�R&VB&�r'�&�s�t�VFW"��S�6V����VFW"Gv�6V���r����VFW#�F�R6V��2����VB��"" ��VB�&�G��'6U�F&�R�&����W2��VE����b�VBV�6R�Т�WB��Тf�""��&�G���6V��2��2f�"2��%Т�b��W2�B�V���W2����V�6V��2���'G2��"W3�W2"R���2��b�V�6R2f�"��2�������W2�6V��2��b5ТV�6S��'G2��2f�"2��6V��2�b5Т�b'G3���WB�V�B�"�"����'G2��'7G&��"�"��"�"��&WGW&�""�����WB����2����������f�wW&W2���������Р�d�uU$U�$Tb�&R�6����R�"%�"��6VU�2���f�r��W&W������FWĖ��W7G&F����F�w&ҕ�2���ӕҷŴ�e��5Ҳ��""�&R䒐���FVbf�wW&U�&Vg2�FW�B���""'�vf�wW&R2r�w�FR�br�����&VfW'&VBF���F�RFW�B�"" ����B���&F��&f�wW&R"�b����vW"���7F'G7v�F��&f�r"�V�6R����vW"���&WGW&��"W2W2"R����B���w&�W������w&�W�"����vW"���f�"���d�uU$U�$Tb�f��F�FW"�FW�B�Р��FVbf�wW&U��&V6F��ⓠ�"""vf�wW&R2rg&��6F���F�B7F'G2tf�r�2�r�"tf�wW&R3�r����Rv�V�F�R6F����2���V�&W"��"" ���d�uU$U�$Tb��F6���6F����"""��7G&������b��BӠ�&WGW&����P�&WGW&��W�B��FW"�f�wW&U�&Vg2���w&�W��������2����������7��V��V�&W'2���������Р�FVb�V�&W%�v�&B�ⓠ�&WGW&�7G'V7GW&R�t�$E5�����F�F�R���b������V�7G'V7GW&R�t�$E2�V�6R7G"�␠
+def sentences(text):
+    t = ABBREV.sub(lambda m: m.group(1) + "<dot>", text.strip())
+    return [s.replace("<dot>", ".") for s in re.split(r"(?<=[.!?])[\"')\]\u201d\u2019]*\s+(?=[\"'(\[\u201c\u2018]?[A-Z0-9])", t) if s.strip()]
+
+
+def capitalized(text):
+    return set(re.findall(r"\b[A-Z][a-z]{2,}\b", text))
+
+
+def new_names(out, source, allowed=()):
+    """Capitalized words in `out` that the source does not contain, leaving out a sentence's first word when it is
+    an ordinary word (lower case somewhere in the source or in the answer itself)."""
+    low = source.lower()
+    found = set()
+    for s in sentences(out):
+        first = re.match(r"\W*([A-Za-z]+)", s)
+        for w in capitalized(s):
+            if first and w == first.group(1):
+                continue
+            found.add(w)
+    allowed = {a.lower() for a in allowed}
+    return sorted(w for w in found if w.lower() not in low and w.lower() not in allowed)
+
+
+def check(job, out, source, allowed=()):
+    """{name: value} plus 'pass' and 'failed' (the names of the failed checks)."""
+    lim = LIMITS[job]
+    sents = sentences(out)
+    names = new_names(out, source, allowed)
+    c = {"sentences": len(sents), "words": len(out.split()), "new_names": names,
+         "sentences_ok": lim["min_sentences"] <= len(sents) <= lim["max_sentences"],
+         "length_ok": len(out.split()) <= lim["max_words"],
+         "no_first_person": not FIRST_PERSON.search(out), "no_markdown": not MARKDOWN.search(out),
+         "no_symbols": not SYMBOLS.search(out), "single_paragraph": "\n" not in out.strip(), "no_new_names": not names}
+    c["failed"] = [k for k, v in c.items() if (k.endswith("_ok") or k.startswith("no_") or k == "single_paragraph") and not v]
+    c["pass"] = not c["failed"]
+    return c
+
+
+def paragraphs(text):
+    return [p.strip() for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+
+
+def check_translation(out, source):
+    """A translated chunk keeps every paragraph and has no Markdown."""
+    n_in, n_out = len(paragraphs(source)), len(paragraphs(out))
+    c = {"paragraphs_in": n_in, "paragraphs_out": n_out, "paragraphs_ok": n_in == n_out,
+         "no_markdown": not re.search(r"(^#|\*\*|`|\[.*\]\(.*\))", out, re.M)}
+    c["failed"] = [k for k in ("paragraphs_ok", "no_markdown") if not c[k]]
+    c["pass"] = not c["failed"]
+    return c
+
+
+# ---------- tables ----------
+
+def is_table(para):
+    lines = [l for l in para.split("\n") if l.strip()]
+    return len(lines) >= 2 and all(l.strip().startswith("|") for l in lines)
+
+
+def parse_table(para):
+    """(head, body): lists of rows of cells from a Markdown table (head empty when there is no rule line)."""
+    rows = [[c.strip() for c in l.strip().strip("|").split("|")] for l in para.split("\n") if l.strip()]
+    rule = next((i for i, r in enumerate(rows) if r and all(re.fullmatch(r":?-{2,}:?", c) for c in r if c)), None)
+    if rule is None:
+        return [], rows
+    return rows[:rule], rows[rule + 1:]
+
+
+def table_size(para):
+    head, body = parse_table(para)
+    cols = max([len(r) for r in head + body] or [0])
+    return len(body), cols
+
+
+def is_large(para):
+    rows, cols = table_size(para)
+    return rows > TABLE_MAX_ROWS or cols > TABLE_MAX_COLUMNS
+
+
+def read_table(para):
+    """A small table read row by row: 'Header one: cell, header two: cell.' (no header: the cells joined)."""
+    head, body = parse_table(para)
+    names = head[-1] if head else []
+    out = []
+    for r in body:
+        cells = [c for c in r]
+        if names and len(names) == len(cells):
+            parts = ["%s: %s" % (n, c) if n else c for n, c in zip(names, cells) if c]
+        else:
+            parts = [c for c in cells if c]
+        if parts:
+            out.append(", ".join(parts).rstrip(".") + ".")
+    return " ".join(out)
+
+
+# ---------- figures ----------
+
+FIGURE_REF = re.compile(r"\b(?:see\s+)?(Fig(?:ure|\.)?|Plate|Illustration|Diagram)\s+([0-9]+|[IVXLC]+)\b", re.I)
+
+
+def figure_refs(text):
+    """{'figure 3', 'plate iv', ...} referred to in the text."""
+    kind = lambda k: "figure" if k.lower().startswith("fig") else k.lower()
+    return {"%s %s" % (kind(m.group(1)), m.group(2).lower()) for m in FIGURE_REF.finditer(text)}
+
+
+def figure_label(caption):
+    """'figure 3' from a caption that starts 'Fig. 3.' or 'Figure 3:' (None when the caption has no number)."""
+    m = FIGURE_REF.match((caption or "").strip())
+    if not m:
+        return None
+    return next(iter(figure_refs(m.group(0))))
+
+
+# ---------- spoken numbers ----------
+
+def number_word(n):
+    return structure.WORDS[n - 1].title() if 1 <= n <= len(structure.WORDS) else str(n)
