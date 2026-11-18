@@ -24,6 +24,20 @@ TOC_LESSON_RE = re.compile(r"^\s*(.*?\b(?:Lesson|LESSON)\b(?:\s+\S+)?\.?)\s*(?:[
 BACK_MATTER_RE = re.compile(r"^\s*(bibliography|index|general index|colophon|advertisements?|publishers?\W{0,2} announcements?"
                             r"|(?:other )?books by the same author|also by [A-Za-z .]{2,40}|other books by [A-Za-z .]{2,40})\s*[.:]?\s*$", re.I)
 
+# Unnumbered section headings: Introduction, Preface, Part I, Prologue, Epilogue, etc.
+# These are standalone lines (not merged with body text) that mark section boundaries.
+UNNUMBERED_SECTION_RE = re.compile(
+    r"^\s*(Introduction|Introductory Note|Note to the Reader|Preface|Author's Note|Author's Foreword|"
+    r"Foreword|Prologue|Epilogue|Afterword|Coda|"
+    r"Part\s+[IVXLC]+|Part\s+\d+|Part\s+[A-Z][a-z]*|"
+    r"Book\s+[IVXLC]+|Book\s+\d+|Book\s+[A-Z][a-z]*|"
+    r"Appendix\s+[A-Z0-9]+|Appendix\s+[A-Z][a-z]*|"
+    r"Interlude|Intermezzo|Prelude|Overture|Curtain|Raise|Drop|"
+    r"Act\s+[IVXLC]+|Act\s+\d+|Act\s+[A-Z][a-z]*|"
+    r"Scene\s+[IVXLC]+|Scene\s+\d+|Scene\s+[A-Z][a-z]*)\s*[.:]?\s*$",
+    re.IGNORECASE,
+)
+
 
 def chapter_number(token):
     if token.isdigit():
@@ -123,8 +137,27 @@ def heading_title(lines):
     return _title_case(text) if pageparts._mostly_upper(text) else text
 
 
+def unnumbered_section_number(line, expected):
+    """(number, label) for an unnumbered section heading line, else None.
+    Returns a sequential number and the section label (e.g., 'Introduction', 'Part I')."""
+    m = UNNUMBERED_SECTION_RE.match(line)
+    if not m:
+        return None
+    label = re.sub(r"\s+", " ", m.group(1)).strip()
+    # Title-case the label for display, but preserve Roman numerals
+    if pageparts._mostly_upper(label):
+        # Preserve Roman numerals after Part/Book/Act/Scene/Appendix
+        mm = re.match(r"^(Part|Book|Act|Scene|Appendix)\s+([IVXLC]+)$", label, re.IGNORECASE)
+        if mm:
+            label = f"{mm.group(1).title()} {mm.group(2)}"
+        else:
+            label = _title_case(label)
+    return expected, label
+
+
 def find_headings(units):
     """'CHAPTER ONE' then the title line(s) up to a blank line, within the first 12 lines of a unit.
+    Also detects unnumbered sections (Introduction, Part I, Prologue, etc.).
     A heading whose number does not rise (a table-of-contents entry that came before the real chapter) is replaced by the
     later one. With no heading at all the whole body is one chapter ('synthetic')."""
     found = []
@@ -138,6 +171,34 @@ def find_headings(units):
                 break
             got = heading_number(ln, (found[-1]["number"] + 1) if found else 1)
             if got is None:
+                # Check for unnumbered section headings (Introduction, Part I, etc.)
+                unum = unnumbered_section_number(ln, (found[-1]["number"] + 1) if found else 1)
+                if unum is not None:
+                    n, label = unum
+                    k = li + 1
+                    while k < len(lines) and not lines[k].strip():
+                        k += 1
+                    title = []
+                    while k < len(lines) and lines[k].strip():
+                        line_text = lines[k].strip()
+                        if len(line_text) > 40 and not pageparts._mostly_upper(line_text) and "." in line_text:
+                            break
+                        if len(line_text) > 10 and any(c in line_text for c in ".!?") and not pageparts._mostly_upper(line_text):
+                            break
+                        if len(line_text) > 50:
+                            break
+                        title.append(line_text)
+                        k += 1
+                    h = {"unit": ui, "line": li, "title_end": k, "number": n, "title": heading_title(title)}
+                    if not h["title"]:
+                        h["title"] = label
+                    h["label"] = label
+                    h["unnumbered"] = True
+                    while found and found[-1]["number"] >= n and not found[-1].get("unnumbered"):
+                        found.pop()
+                        h["replaced_earlier"] = True
+                    found.append(h)
+                    break
                 continue
             n, guessed = got
             k = li + 1
@@ -178,7 +239,7 @@ def find_headings(units):
                 h["title"] = re.sub(r"(?<!\.)\.$", "", h["title"])     # 'The Coming of the Master.': the heading's own full stop
             if guessed:
                 h["guessed"] = True
-            while found and found[-1]["number"] >= n:      # the earlier one was a contents entry or a misread
+            while found and found[-1]["number"] >= n and not found[-1].get("unnumbered"):      # the earlier one was a contents entry or a misread
                 found.pop()
                 h["replaced_earlier"] = True
             found.append(h)

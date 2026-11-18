@@ -604,3 +604,44 @@ def test_page_ledger_with_frontmatter():
     assert "frontmatter-title" in sections
     assert "frontmatter-copyright" in sections
     assert "chapter-1" in sections
+
+
+def test_unnumbered_section_detection():
+    from worker.prep.structure import find_headings
+
+    units = [
+        {"pdf_page": 1, "half": None, "text": "INTRODUCTION\n\nThe Historian's Testament\n\nThis book is based upon a larger work.", "geom": None, "normalized": {}},
+        {"pdf_page": 2, "half": None, "text": "More introduction text here.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER ONE\n\nThe Treaty of Versailles\n\nThe peace which ended the Great War.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "PART II\n\nThe War Years\n\nThe war began in 1939.", "geom": None, "normalized": {}},
+        {"pdf_page": 5, "half": None, "text": "More war text.", "geom": None, "normalized": {}},
+        {"pdf_page": 6, "half": None, "text": "EPILOGUE\n\nThe Aftermath\n\nThe war ended in 1945.", "geom": None, "normalized": {}},
+    ]
+    heads = find_headings(units)
+    assert len(heads) == 4
+    assert heads[0]["label"] == "Introduction"
+    assert heads[0]["title"] == "The Historian's Testament"
+    assert heads[1]["title"] == "The Treaty of Versailles"
+    assert heads[2]["label"] == "Part II"
+    assert heads[2]["title"] == "The War Years"
+    assert heads[3]["label"] == "Epilogue"
+    assert heads[3]["title"] == "The Aftermath"
+
+
+def test_unnumbered_section_with_chapters():
+    from worker.prep.structure import find_headings
+
+    units = [
+        {"pdf_page": 1, "half": None, "text": "PROLOGUE\n\nThe Beginning\n\nIt started on a cold winter night.", "geom": None, "normalized": {}},
+        {"pdf_page": 2, "half": None, "text": "CHAPTER 1\n\nThe First Day\n\nThe sun rose over the hills.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER 2\n\nThe Second Day\n\nThe journey continued.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "AFTERWORD\n\nReflections\n\nLooking back on the journey.", "geom": None, "normalized": {}},
+    ]
+    heads = find_headings(units)
+    assert len(heads) == 4
+    assert heads[0]["label"] == "Prologue"
+    assert heads[0]["title"] == "The Beginning"
+    assert heads[1]["title"] == "The First Day"
+    assert heads[2]["title"] == "The Second Day"
+    assert heads[3]["label"] == "Afterword"
+    assert heads[3]["title"] == "Reflections"
