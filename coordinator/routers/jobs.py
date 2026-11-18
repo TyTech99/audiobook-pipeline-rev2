@@ -73,7 +73,7 @@ def list_jobs(
 @router.get("/{job_id}")
 def get_job(
     job_id: UUID,
-    _: Principal = Depends(require_operator),
+    _: Principal = Depends(get_principal),
     conn: Connection = Depends(get_conn),
 ):
     return job_service.get_job(conn, job_id)
