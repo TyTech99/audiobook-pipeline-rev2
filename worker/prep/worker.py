@@ -118,15 +118,24 @@ class PrepWorker:
 
         if input_format == "pdf":
             logger.info("Parsing PDF...")
-            doc = parse_pdf(data, progress_callback=lambda page, total: self.report_progress(
-                job_id,
-                {
-                    "phase": "ocr",
-                    "page": page,
-                    "total_pages": total,
-                    "percent": 5 + int((page / total) * 40),
-                },
-            ) if page % 10 == 0 else None)
+            # Get LLM client for OCR cleanup if available
+            llm_client = None
+            if hasattr(self.analyzer, "client"):
+                llm_client = self.analyzer.client
+            doc = parse_pdf(
+                data,
+                progress_callback=lambda page, total: self.report_progress(
+                    job_id,
+                    {
+                        "phase": "ocr",
+                        "page": page,
+                        "total_pages": total,
+                        "percent": 5 + int((page / total) * 40),
+                    },
+                ) if page % 10 == 0 else None,
+                llm_client=llm_client,
+                language=job.get("metadata", {}).get("language") or "eng",
+            )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.report_progress(job_id, {"phase": "classifying", "percent": 45})
             for page in doc["pages"]:

@@ -17,7 +17,7 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 
-def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None) -> dict:
+def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None, llm_client=None, language: str = "eng") -> dict:
     """Parse PDF bytes into a structured document representation.
 
     Args:
@@ -25,30 +25,70 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
         use_ocr: If True, use Tesseract OCR for pages with no text layer.
         ocr_dpi: Resolution for OCR rendering.
         progress_callback: Optional callable(page_num, total_pages) for progress updates.
+        llm_client: Optional LLM client for cleaning up low-quality OCR pages.
+        language: Language code for OCR and dictionary checking.
     """
     doc = fitz.open(stream=data, filetype="pdf")
     pages = []
     ocr_count = 0
+    llm_cleanup_count = 0
     total_pages = len(doc)
 
     for page_num in range(total_pages):
         page = doc[page_num]
         text = page.get_text("text").strip()
         images = page.get_images(full=True)
+        ocr_quality = None
 
         # If no text layer and OCR is enabled, try OCR
         if not text and use_ocr:
             from worker.prep import ocr
-            text = ocr.ocr_page(page, dpi=ocr_dpi)
+            from worker.prep import ocr_cleanup
+
+            ocr_result = ocr.ocr_page(page, dpi=ocr_dpi, language=language)
+            text = ocr_result["text"]
+
             if text:
                 ocr_count += 1
-                logger.info("OCR used for page %d: %d chars", page_num + 1, len(text))
+                ocr_quality = ocr_cleanup.judge_ocr_quality(ocr_result, language)
+
+                # If quality is poor and we have an LLM client, try cleanup
+                if not ocr_quality["passed"] and llm_client:
+                    logger.info(
+                        "Page %d OCR quality poor (%s), attempting LLM cleanup",
+                        page_num + 1,
+                        ", ".join(ocr_quality["reasons"]),
+                    )
+                    import asyncio
+
+                    try:
+                        cleaned = asyncio.run(
+                            ocr_cleanup.cleanup_page_with_llm(
+                                llm_client, page_num + 1, text, ocr_quality, language
+                            )
+                        )
+                        if cleaned != text:
+                            text = cleaned
+                            llm_cleanup_count += 1
+                            logger.info("Page %d LLM cleanup applied", page_num + 1)
+                    except Exception as e:
+                        logger.warning("Page %d LLM cleanup failed: %s", page_num + 1, e)
+
+                logger.info(
+                    "OCR used for page %d: %d chars, conf=%.1f, dict_share=%.2f%s",
+                    page_num + 1,
+                    len(text),
+                    ocr_quality["confidence"],
+                    ocr_quality["dict_share"],
+                    f" (LLM cleaned)" if llm_cleanup_count > 0 else "",
+                )
 
         pages.append(
             {
                 "page": page_num + 1,
                 "text": text,
                 "images": len(images),
+                "ocr_quality": ocr_quality,
             }
         )
 
@@ -60,7 +100,7 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
     doc.close()
 
     if ocr_count > 0:
-        logger.info("OCR used for %d of %d pages", ocr_count, len(pages))
+        logger.info("OCR used for %d of %d pages (%d LLM cleaned)", ocr_count, len(pages), llm_cleanup_count)
 
     return {
         "format": "pdf",
