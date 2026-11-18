@@ -9,7 +9,10 @@ can work without modification.
 
 from __future__ import annotations
 
+import json as _json
 import logging
+import os as _os
+import pathlib as _pathlib
 import re
 
 import fitz  # PyMuPDF
@@ -17,7 +20,7 @@ import fitz  # PyMuPDF
 logger = logging.getLogger(__name__)
 
 
-def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None, llm_client=None, language: str = "eng", ocr_settings=None) -> dict:
+def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_callback=None, llm_client=None, language: str = "eng", ocr_settings=None, checkpoint_dir: str | None = None, start_page: int | None = None, end_page: int | None = None) -> dict:
     """Parse PDF bytes into a structured document representation.
 
     Args:
@@ -28,6 +31,10 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
         llm_client: Optional LLM client for cleaning up low-quality OCR pages.
         language: Language code for OCR and dictionary checking.
         ocr_settings: Optional OcrQualitySettings from config.
+        checkpoint_dir: Optional directory for per-page OCR checkpoints. If set,
+            completed pages are saved as page-{N}.json and skipped on restart.
+        start_page: Optional 1-based start page (inclusive). Defaults to 1.
+        end_page: Optional 1-based end page (inclusive). Defaults to last page.
     """
     from worker.prep.ocr_cleanup import OcrQualitySettings
 
@@ -40,7 +47,48 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
     llm_cleanup_count = 0
     total_pages = len(doc)
 
-    for page_num in range(total_pages):
+    # Apply page range (1-based, inclusive)
+    start_idx = (start_page or 1) - 1
+    end_idx = end_page if end_page else total_pages
+    start_idx = max(0, min(start_idx, total_pages))
+    end_idx = max(start_idx + 1, min(end_idx, total_pages))
+    page_count = end_idx - start_idx
+    if page_count != total_pages:
+        logger.info("Processing page range %d-%d of %d", start_idx + 1, end_idx, total_pages)
+
+    # Load existing checkpoints
+    checkpoints: dict[int, dict] = {}
+    if checkpoint_dir:
+        cp_path = _pathlib.Path(checkpoint_dir)
+        cp_path.mkdir(parents=True, exist_ok=True)
+        for f in cp_path.glob("page-*.json"):
+            try:
+                page_num = int(f.stem.split("-")[1])
+                with open(f) as fh:
+                    checkpoints[page_num] = _json.load(fh)
+            except (ValueError, _json.JSONDecodeError, OSError):
+                continue
+        if checkpoints:
+            logger.info("Loaded %d page checkpoints from %s", len(checkpoints), checkpoint_dir)
+
+    def save_checkpoint(page_num: int, page_data: dict) -> None:
+        if checkpoint_dir:
+            cp_path = _pathlib.Path(checkpoint_dir)
+            cp_file = cp_path / f"page-{page_num}.json"
+            tmp_file = cp_file.with_suffix(".tmp")
+            tmp_file.write_text(_json.dumps(page_data))
+            tmp_file.rename(cp_file)
+
+    for page_num in range(start_idx, end_idx):
+        # Check if this page has a valid checkpoint
+        if page_num in checkpoints:
+            page_data = checkpoints[page_num]
+            pages.append(page_data)
+            logger.debug("Page %d loaded from checkpoint", page_num + 1)
+            if progress_callback:
+                progress_callback(page_num + 1 - start_idx, page_count)
+            continue
+
         page = doc[page_num]
         text = page.get_text("text").strip()
         images = page.get_images(full=True)
@@ -89,18 +137,20 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
                     " (LLM cleaned)" if llm_cleanup_count > 0 else "",
                 )
 
-        pages.append(
-            {
-                "page": page_num + 1,
-                "text": text,
-                "images": len(images),
-                "ocr_quality": ocr_quality,
-            }
-        )
+        page_data = {
+            "page": page_num + 1,
+            "text": text,
+            "images": len(images),
+            "ocr_quality": ocr_quality,
+        }
+        pages.append(page_data)
+
+        # Save checkpoint for this page
+        save_checkpoint(page_num, page_data)
 
         # Report progress every page (callback decides whether to actually report)
         if progress_callback:
-            progress_callback(page_num + 1, total_pages)
+            progress_callback(page_num + 1 - start_idx, page_count)
 
     metadata = doc.metadata or {}
     doc.close()

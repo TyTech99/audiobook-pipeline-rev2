@@ -59,6 +59,7 @@ class JobSubmitIn(BaseModel):
     input_format: str
     input_url: str
     metadata: dict = Field(default_factory=dict)
+    page_range: list[int] | None = Field(default=None, description="Optional 1-based inclusive page range [start, end] for PDF processing")
 
 
 class JobProgressIn(BaseModel):

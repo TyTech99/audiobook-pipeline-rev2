@@ -40,6 +40,47 @@ def test_submit_prep_job_creates_record_and_queue_message(app, sql):
     assert msg["input_url"] == "s3://bucket/inputs/test/source.pdf"
 
 
+def test_submit_prep_job_with_page_range(app, sql):
+    response = app.post(
+        "/api/v1/jobs",
+        headers=OP,
+        json={
+            "type": "prep",
+            "input_format": "pdf",
+            "input_url": "s3://bucket/inputs/test/source.pdf",
+            "metadata": {"title": "Test Book", "author": "Test Author"},
+            "page_range": [1, 50],
+        },
+    )
+    assert response.status_code == 201, response.text
+    job_id = response.json()["job_id"]
+
+    rows = sql("SELECT * FROM jobs WHERE job_id = %s", (job_id,))
+    assert rows[0]["metadata"]["page_range"] == [1, 50]
+
+    redis_client = app.app.state.redis
+    message = redis_client.lpop("prep")
+    import json
+
+    msg = json.loads(message)
+    assert msg["page_range"] == [1, 50]
+
+
+def test_submit_prep_job_invalid_page_range(app, sql):
+    response = app.post(
+        "/api/v1/jobs",
+        headers=OP,
+        json={
+            "type": "prep",
+            "input_format": "pdf",
+            "input_url": "s3://bucket/inputs/test/source.pdf",
+            "page_range": [50, 1],
+        },
+    )
+    assert response.status_code == 400
+    assert "page_range" in response.json()["detail"]
+
+
 def test_submit_convert_job(app, sql):
     response = app.post(
         "/api/v1/jobs",

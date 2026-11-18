@@ -452,6 +452,8 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "m4b").mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "mp3").mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = OUTPUT_DIR / "checkpoint"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     # Load inputs
     script = load_script(INPUT_DIR)
@@ -486,11 +488,29 @@ def main() -> int:
     total_segments = 0
     failed_segments = 0
 
+    # Load existing chapter checkpoints (mastered WAVs from a previous run)
+    existing_checkpoints: dict[int, pathlib.Path] = {}
+    for f in checkpoint_dir.glob("chapter-*.wav"):
+        try:
+            ch_num = int(f.stem.split("-")[1])
+            existing_checkpoints[ch_num] = f
+        except (ValueError, IndexError):
+            continue
+    if existing_checkpoints:
+        log.info("Loaded %d chapter checkpoints from %s", len(existing_checkpoints), checkpoint_dir)
+
     for chapter in script["chapters"]:
-        ch_num = chapter.get("chapter", len(chapter_wavs) + 1)
+        ch_num = chapter.get("chapter", len(chapter_info) + 1)
         ch_title = chapter.get("title", f"Chapter {ch_num}")
         segments = chapter.get("segments", [])
         if not segments:
+            continue
+
+        # Check if this chapter has a checkpointed mastered WAV
+        if ch_num in existing_checkpoints:
+            cp_wav = existing_checkpoints[ch_num]
+            chapter_info.append({"chapter": ch_num, "title": ch_title, "wav": cp_wav, "mastered": cp_wav})
+            log.info("Chapter %d loaded from checkpoint", ch_num)
             continue
 
         ch_temp_dir = pathlib.Path(temp_dir) / f"ch{ch_num:03d}"
@@ -532,11 +552,10 @@ def main() -> int:
         if seg_wavs:
             ch_wav = ch_temp_dir / f"chapter-{ch_num:03d}.wav"
             concat_wavs(seg_wavs, ch_wav)
-            chapter_wavs.append(ch_wav)
             chapter_info.append({"chapter": ch_num, "title": ch_title, "wav": ch_wav})
             log.info("Chapter %d complete: %d segments", ch_num, len(segments))
 
-    if not chapter_wavs:
+    if not chapter_info:
         log.error("No chapters were generated")
         return 1
 
@@ -567,10 +586,20 @@ def main() -> int:
 
     mastered_chapters: list[pathlib.Path] = []
     for ch in chapter_info:
+        # Chapters loaded from checkpoint already have their mastered WAV
+        if "mastered" in ch:
+            mastered_chapters.append(ch["mastered"])
+            continue
         mastered = mastered_dir / f"chapter-{ch['chapter']:03d}.wav"
         master_wav(ch["wav"], mastered)
+        # Checkpoint the mastered WAV for resume
+        cp_path = checkpoint_dir / f"chapter-{ch['chapter']:03d}.wav"
+        tmp_path = cp_path.with_suffix(".tmp")
+        shutil.copy2(mastered, tmp_path)
+        tmp_path.rename(cp_path)
         mastered_chapters.append(mastered)
         ch["mastered"] = mastered
+        log.info("Chapter %d mastered and checkpointed", ch["chapter"])
 
     mastered_opening = mastered_dir / "opening.wav"
     mastered_closing = mastered_dir / "closing.wav"

@@ -145,6 +145,15 @@ class PrepWorker:
             from worker.prep.ocr_cleanup import OcrQualitySettings
 
             ocr_settings = OcrQualitySettings.from_config(self.settings)
+            # Checkpoint dir for resumable OCR (under output prefix)
+            output_prefix = self.settings.get("output_prefix") or ""
+            if output_prefix.startswith("file://"):
+                output_prefix = output_prefix[7:]
+            checkpoint_dir = f"{output_prefix.rstrip('/')}/checkpoint" if output_prefix else None
+            # Page range (optional, 1-based inclusive)
+            page_range = job.get("page_range") or job.get("metadata", {}).get("page_range")
+            start_page = page_range[0] if page_range else None
+            end_page = page_range[1] if page_range else None
             doc = parse_pdf(
                 data,
                 progress_callback=lambda page, total: self.report_progress(
@@ -159,6 +168,9 @@ class PrepWorker:
                 llm_client=llm_client,
                 language=job.get("metadata", {}).get("language") or "eng",
                 ocr_settings=ocr_settings,
+                checkpoint_dir=checkpoint_dir,
+                start_page=start_page,
+                end_page=end_page,
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.report_progress(job_id, {"stage": "classifying", "percent": 45})

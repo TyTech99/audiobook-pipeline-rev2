@@ -83,6 +83,23 @@ def test_parse_pdf():
     assert "Chapter 1" in doc["pages"][0]["text"]
 
 
+def test_parse_pdf_page_range():
+    data = make_test_pdf()
+    doc = parse_pdf(data, start_page=2, end_page=3)
+    assert doc["total_pages"] == 2
+    assert len(doc["pages"]) == 2
+    assert doc["pages"][0]["page"] == 2
+    assert doc["pages"][1]["page"] == 3
+
+
+def test_parse_pdf_page_range_single_page():
+    data = make_test_pdf()
+    doc = parse_pdf(data, start_page=1, end_page=1)
+    assert doc["total_pages"] == 1
+    assert len(doc["pages"]) == 1
+    assert doc["pages"][0]["page"] == 1
+
+
 def test_classify_page():
     blank = {"page": 1, "text": "", "images": 0}
     assert classify_page(blank) == ("skipped", "blank")

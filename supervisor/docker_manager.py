@@ -201,7 +201,8 @@ class DockerManager:
                 continue
             queue = "prep" if worker_type == "prep" else "convert"
             depth = queue_depths.get(queue, 0)
-            if depth > 0:
+            processing_depth = queue_depths.get(f"{queue}_processing", 0)
+            if depth > 0 or processing_depth > 0:
                 continue
             started = self.worker_started_at.get(name, now)
             if now - started >= self.settings.idle_timeout_seconds:

@@ -72,6 +72,13 @@ def submit_job(conn: Connection, body: dict, settings: Settings, redis_client: r
     # also carries package_url so TTS workers can download without remapping.
     package_url = body.get("input_url") if job_type == "convert" else None
     metadata = body.get("metadata") or {}
+    page_range = body.get("page_range")
+    if page_range is not None:
+        if len(page_range) != 2 or not all(isinstance(p, int) and p >= 1 for p in page_range):
+            raise ApiError(400, "invalid_request", "page_range must be [start, end] with start >= 1 and end >= start")
+        if page_range[1] < page_range[0]:
+            raise ApiError(400, "invalid_request", "page_range end must be >= start")
+        metadata["page_range"] = page_range
     job_id = uuid4()
     now = utcnow()
     conn.execute(
@@ -109,6 +116,8 @@ def submit_job(conn: Connection, body: dict, settings: Settings, redis_client: r
         "metadata": metadata,
         "created_at": iso(now),
     }
+    if page_range is not None:
+        message["page_range"] = page_range
     if job_type == "convert":
         message["package_url"] = package_url
         message["voice_recipe"] = metadata.get("voice_recipe") or {}
@@ -272,6 +281,8 @@ def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client:
                 "metadata": metadata,
                 "created_at": iso(row["created_at"]),
             }
+            if metadata.get("page_range"):
+                message["page_range"] = metadata["page_range"]
             redis_client.rpush(PREP_QUEUE, json.dumps(message))
         phase = "prep"
     else:
