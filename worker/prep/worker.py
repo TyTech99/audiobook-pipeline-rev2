@@ -27,6 +27,13 @@ from worker.prep.pdf_parser import classify_page, detect_chapters, parse_pdf
 logger = logging.getLogger("worker.prep")
 
 
+class JobCancelled(Exception):
+    """Raised when a job is cancelled while being processed."""
+    def __init__(self, job_id: str):
+        self.job_id = job_id
+        super().__init__(f"Job {job_id} was cancelled")
+
+
 class PrepWorker:
     def __init__(
         self,
@@ -51,6 +58,27 @@ class PrepWorker:
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def check_cancelled(self, job_id: str) -> None:
+        """Check if a job has been cancelled. Raises JobCancelled if so."""
+        if self.redis.exists(f"job:cancel:{job_id}"):
+            self.redis.delete(f"job:cancel:{job_id}")
+            raise JobCancelled(job_id)
+
+    def _ocr_progress(self, job_id: str, page: int, total: int) -> None:
+        """OCR progress callback: report every 10 pages, check cancel every 5."""
+        if page % 5 == 0:
+            self.check_cancelled(job_id)
+        if page % 10 == 0:
+            self.report_progress(
+                job_id,
+                {
+                    "stage": "ocr",
+                    "current_page": page,
+                    "total_pages": total,
+                    "percent": 5 + int((page / total) * 40),
+                },
+            )
 
     def register(self) -> None:
         response = self.http.post(
@@ -127,12 +155,14 @@ class PrepWorker:
         input_url = job["input_url"]
 
         logger.info("Processing job %s (%s)", job_id, input_format)
+        self.check_cancelled(job_id)
         self.mark_in_progress(job_id)
         self.report_progress(job_id, {"stage": "downloading", "percent": 0})
 
         logger.info("Downloading input: %s", input_url)
         data = download_bytes(input_url, http_client=self.http)
         logger.info("Downloaded %d bytes", len(data))
+        self.check_cancelled(job_id)
         self.report_progress(job_id, {"stage": "parsing", "percent": 5})
 
         if input_format == "pdf":
@@ -156,15 +186,7 @@ class PrepWorker:
             end_page = page_range[1] if page_range else None
             doc = parse_pdf(
                 data,
-                progress_callback=lambda page, total: self.report_progress(
-                    job_id,
-                    {
-                        "stage": "ocr",
-                        "current_page": page,
-                        "total_pages": total,
-                        "percent": 5 + int((page / total) * 40),
-                    },
-                ) if page % 10 == 0 else None,
+                progress_callback=lambda page, total: self._ocr_progress(job_id, page, total),
                 llm_client=llm_client,
                 language=job.get("metadata", {}).get("language") or "eng",
                 ocr_settings=ocr_settings,
@@ -173,6 +195,7 @@ class PrepWorker:
                 end_page=end_page,
             )
             logger.info("Parsed %d pages", doc["total_pages"])
+            self.check_cancelled(job_id)
             self.report_progress(job_id, {"stage": "classifying", "percent": 45})
             for page in doc["pages"]:
                 action, reason = classify_page(page)
@@ -189,6 +212,7 @@ class PrepWorker:
                 page["reason"] = reason
 
         logger.info("Detecting chapters...")
+        self.check_cancelled(job_id)
         chapters = detect_chapters(doc["pages"])
         logger.info("Detected %d chapters", len(chapters))
         self.report_progress(job_id, {"stage": "chapters", "percent": 50, "total_chapters": len(chapters)})
@@ -234,6 +258,7 @@ class PrepWorker:
         self.report_progress(job_id, {"stage": "script", "percent": 85, "total_segments": script["metadata"]["total_segments"]})
 
         logger.info("Building EPUB...")
+        self.check_cancelled(job_id)
         self.report_progress(job_id, {"stage": "epub", "percent": 90})
         epub_data = build_epub(title, author, language, doc["pages"], chapters)
 
@@ -334,6 +359,9 @@ class PrepWorker:
                 self.heartbeat(job_id)
                 self.process_job(job)
                 self.ack_job(job)
+            except JobCancelled as exc:
+                logger.info("Job %s cancelled, stopping", exc.job_id)
+                self.nack_job(job, "cancelled")
             except Exception as exc:
                 logger.error("Job %s failed: %s", job.get("job_id"), exc)
                 try:

@@ -315,6 +315,12 @@ def test_prep_worker_uses_analyzer(tmp_path):
         def lrem(self, name, count, value):
             return 0
 
+        def exists(self, name):
+            return 0
+
+        def delete(self, name):
+            return 1
+
     class FakeHttp:
         def post(self, url, headers=None, json=None, timeout=None):
             return type("R", (), {"status_code": 200, "raise_for_status": lambda self=None: None})()
@@ -426,3 +432,48 @@ def test_scan_pages_for_isbn():
         {"text": "ISBN 978-0-306-40615-7"},
     ]
     assert scan_pages_for_isbn(pages) == "9780306406157"
+
+
+def test_job_cancelled_exception():
+    from worker.prep.worker import JobCancelled
+
+    exc = JobCancelled("test-job-123")
+    assert exc.job_id == "test-job-123"
+    assert "test-job-123" in str(exc)
+
+
+def test_check_cancelled_raises_when_flag_set():
+    import redis
+    from unittest.mock import MagicMock
+    from worker.prep.worker import PrepWorker, JobCancelled
+
+    mock_redis = MagicMock()
+    mock_redis.exists.return_value = 1
+    mock_redis.delete.return_value = 1
+
+    worker = PrepWorker.__new__(PrepWorker)
+    worker.redis = mock_redis
+
+    with pytest.raises(JobCancelled):
+        worker.check_cancelled("test-job")
+
+    mock_redis.exists.assert_called_once_with("job:cancel:test-job")
+    mock_redis.delete.assert_called_once_with("job:cancel:test-job")
+
+
+def test_check_cancelled_noop_when_flag_not_set():
+    import redis
+    from unittest.mock import MagicMock
+    from worker.prep.worker import PrepWorker, JobCancelled
+
+    mock_redis = MagicMock()
+    mock_redis.exists.return_value = 0
+
+    worker = PrepWorker.__new__(PrepWorker)
+    worker.redis = mock_redis
+
+    # Should not raise
+    worker.check_cancelled("test-job")
+
+    mock_redis.exists.assert_called_once_with("job:cancel:test-job")
+    mock_redis.delete.assert_not_called()

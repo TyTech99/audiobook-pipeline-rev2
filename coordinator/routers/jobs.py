@@ -131,7 +131,8 @@ def fail_job(
 @router.post("/{job_id}/cancel")
 def cancel_job(
     job_id: UUID,
+    request: Request,
     _: Principal = Depends(require_operator),
     conn: Connection = Depends(get_conn),
 ):
-    return job_service.cancel_job(conn, job_id)
+    return job_service.cancel_job(conn, job_id, request.app.state.redis)

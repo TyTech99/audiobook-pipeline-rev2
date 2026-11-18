@@ -303,12 +303,15 @@ def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client:
 
 
 
-def cancel_job(conn: Connection, job_id) -> dict:
+def cancel_job(conn: Connection, job_id, redis_client: redis.Redis | None = None) -> dict:
     row = _load_job(conn, job_id)
     if row["status"] in ("failed", "convert_failed", "complete", "cancelled"):
         raise ApiError(409, "invalid_state", "job cannot be cancelled", {"status": row["status"]})
     now = utcnow()
     conn.execute("UPDATE jobs SET status = 'cancelled', updated_at = %s WHERE job_id = %s", (now, job_id))
+    # Set cancel flag so any worker processing this job stops promptly
+    if redis_client is not None:
+        redis_client.set(f"job:cancel:{job_id}", "1", ex=3600)
     return {"job_id": str(job_id), "status": "cancelled"}
 
 
