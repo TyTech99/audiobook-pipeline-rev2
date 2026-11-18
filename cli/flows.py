@@ -231,8 +231,10 @@ def install_coordinator(host, state: dict, messages: list[str], force: bool = Fa
     host.install_packages(coordinator_packages(state))
     host.write(paths["coordinator_env"], text)
     # Also write a .env file in the coordinator prefix so manual `docker compose`
-    # invocations (outside systemd) can find the credentials.
+    # invocations (outside systemd) can find the credentials. Must be readable
+    # by the user running docker compose (not just root).
     host.write(paths["coordinator_prefix"] + "/.env", text)
+    host.chmod(paths["coordinator_prefix"] + "/.env", 0o644)
     host.write(paths["coordinator_prefix"] + "/REVISION", _deployed_revision())
     _install_coordinator_files(host, paths["coordinator_prefix"], state)
     host.install_unit(paths["coordinator_unit"], unit)

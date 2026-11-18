@@ -88,6 +88,9 @@ class RealHost:
         if file.name.endswith(".env"):
             os.chmod(file, 0o600)
 
+    def chmod(self, path: str, mode: int) -> None:
+        os.chmod(path, mode)
+
     def remove(self, path: str) -> None:
         file = Path(path)
         if file.is_file():
