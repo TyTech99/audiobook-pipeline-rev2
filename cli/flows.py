@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import subprocess
 import time
 from pathlib import Path
 
@@ -17,6 +18,21 @@ EXIT_REBOOT = 4
 
 
 SUPERVISOR_IMAGE = "audiobook-supervisor:local"
+
+
+def _deployed_revision() -> str:
+    """Return the git commit hash of the deployed code, or 'unknown' if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=5,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
 
 
 def coordinator_packages(state: dict) -> list[str]:
@@ -214,7 +230,10 @@ def install_coordinator(host, state: dict, messages: list[str], force: bool = Fa
         messages.append("coordinator unchanged (forced redeploy)")
     host.install_packages(coordinator_packages(state))
     host.write(paths["coordinator_env"], text)
-    host.write(paths["coordinator_prefix"] + "/REVISION", "installed")
+    # Also write a .env file in the coordinator prefix so manual `docker compose`
+    # invocations (outside systemd) can find the credentials.
+    host.write(paths["coordinator_prefix"] + "/.env", text)
+    host.write(paths["coordinator_prefix"] + "/REVISION", _deployed_revision())
     _install_coordinator_files(host, paths["coordinator_prefix"], state)
     host.install_unit(paths["coordinator_unit"], unit)
     messages.append("coordinator installed")
@@ -266,7 +285,7 @@ def install_node(host, state: dict, api, messages: list[str], force: bool = Fals
         messages.append("node unchanged (forced redeploy)")
     host.install_packages(packages)
     host.write(env_path, text)
-    host.write(paths["node_prefix"] + "/REVISION", "installed")
+    host.write(paths["node_prefix"] + "/REVISION", _deployed_revision())
     if windows:
         if host.reboot_pending:
             return {"code": EXIT_REBOOT, "changed": False}
