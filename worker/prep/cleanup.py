@@ -159,8 +159,8 @@ def unit_lines(unit, title, heading, first_unit, notes, running=(), start_line=0
     return out
 
 
-INDENT_PT = 4.5    # a paragraph's first line sits at least this many points right of the line before it
-GAP_PT = 2.5       # or this many points lower than the page's normal line spacing
+INDENT_PT = 4.5    # a paragraph's first line sits at least this many points right of the line before it (default; overridden by NormalizationSettings)
+GAP_PT = 2.5       # or this many points lower than the page's normal line spacing (default)
 SAMELINE_CAP = re.compile(r"^([A-Z])\s{2,}([A-Z]{2,})\b")
 SAMELINE_CAP_LOWER = re.compile(r"^([A-Z])\s+([a-z]+)\b")     # 'T      he Western', 'I n this': a drop cap before the rest of a lower-case word
 
@@ -177,16 +177,16 @@ def lower_dropcap(text):
     return None
 
 
-PITCH_MIN_PT, PITCH_MAX_PT = 6, 40    # line gaps outside this range are column jumps or overlaps, never line spacing
+PITCH_MIN_PT, PITCH_MAX_PT = 6, 40    # line gaps outside this range are column jumps or overlaps, never line spacing (defaults)
 
 
-def line_pitch(gaps):
+def line_pitch(gaps, pitch_min=PITCH_MIN_PT, pitch_max=PITCH_MAX_PT):
     """The page's normal line spacing: the most common gap between consecutive lines (rounded to 0.5 pt; a tie goes to
     the smaller gap). Inside a paragraph every gap is the line spacing, so it is the commonest gap on any page with
     text, whatever the type size. None when the page has no usable gap."""
     counts = {}
     for g in gaps:
-        if PITCH_MIN_PT < g < PITCH_MAX_PT:
+        if pitch_min < g < pitch_max:
             r = round(g * 2) / 2
             counts[r] = counts.get(r, 0) + 1
     if not counts:
@@ -194,12 +194,14 @@ def line_pitch(gaps):
     return min(counts, key=lambda r: (-counts[r], r))
 
 
-def unit_stats(lines):
+def unit_stats(lines, settings=None):
     """Per page unit: normal line pitch and the local left margin, read from line positions in points."""
+    pitch_min = settings.pitch_min_pt if settings else PITCH_MIN_PT
+    pitch_max = settings.pitch_max_pt if settings else PITCH_MAX_PT
     stats = {}
     for u in {l["unit"] for l in lines}:
         mine = [l for l in lines if l["unit"] == u and l["x"] is not None]
-        pitch = line_pitch([b["y"] - a["y"] for a, b in zip(mine, mine[1:])])
+        pitch = line_pitch([b["y"] - a["y"] for a, b in zip(mine, mine[1:])], pitch_min=pitch_min, pitch_max=pitch_max)
         stats[u] = {"pitch": pitch if pitch is not None else 13.0, "lines": mine}
     return stats
 
@@ -210,19 +212,22 @@ def local_margin(stats, ln):
     return min(near) if near else ln["x"]
 
 
-def starts_paragraph(prev, ln, stats):
+def starts_paragraph(prev, ln, stats, settings=None):
     """True if the line opens a paragraph. Evidence is geometric: indented relative to the line before it, or
     set lower than normal line spacing. A line with no position, or one that begins in lower case, never starts one."""
+    indent_pt = settings.indent_pt if settings else INDENT_PT
+    gap_pt = settings.gap_pt if settings else GAP_PT
     if ln["x"] is None or ln["text"][:1].islower():
         return False
     if prev is not None and prev["unit"] == ln["unit"] and prev["x"] is not None:
-        return ln["x"] - prev["x"] >= INDENT_PT or ln["y"] - prev["y"] >= stats[ln["unit"]]["pitch"] + GAP_PT
-    return ln["x"] - local_margin(stats, ln) >= INDENT_PT
+        return ln["x"] - prev["x"] >= indent_pt or ln["y"] - prev["y"] >= stats[ln["unit"]]["pitch"] + gap_pt
+    return ln["x"] - local_margin(stats, ln) >= indent_pt
 
 
-def paragraphs_from(lines, inline, notes):
+def paragraphs_from(lines, inline, notes, settings=None):
     """Group lines into paragraphs and repair drop caps. With line positions (the normal case) a paragraph break is
     an indent or a vertical gap; without them (older callers) it is the layout indent of the first line."""
+    indent_pt = settings.indent_pt if settings else INDENT_PT
     kept, breaks = [], set()                    # a section break (ornament line) ends the paragraph before it
     for l in lines:
         if l.get("ornament"):
@@ -233,7 +238,7 @@ def paragraphs_from(lines, inline, notes):
     if not lines:
         return []
     geometric = any(l.get("x") is not None for l in lines)
-    stats = unit_stats(lines) if geometric else None
+    stats = unit_stats(lines, settings=settings) if geometric else None
     base = min(l["indent"] for l in lines)
     i, paras, cur, cap_indent, wrap, prev = 0, [], None, None, False, None
     while i < len(lines):
@@ -243,11 +248,11 @@ def paragraphs_from(lines, inline, notes):
         is_cap = split_dropcap(lines, i)
         same = (SAMELINE_CAP.match(ln["text"]) or lower_dropcap(ln["text"])) if not is_cap else None
         if geometric:
-            if wrap and ln["x"] is not None and ln["x"] - local_margin(stats, ln) >= INDENT_PT and not same:
+            if wrap and ln["x"] is not None and ln["x"] - local_margin(stats, ln) >= indent_pt and not same:
                 is_start = False           # still beside the drop cap
             else:
                 wrap = False
-                is_start = cur is None or starts_paragraph(prev, ln, stats)
+                is_start = cur is None or starts_paragraph(prev, ln, stats, settings=settings)
         else:
             is_start = ln["indent"] - base >= 1 and not (cap_indent is not None and ln["indent"] == cap_indent)
         wide = same is not None and same.group(2).islower() and re.match(r"[A-Z]\s{2,}", ln["text"]) is not None
@@ -371,9 +376,9 @@ def merge_orphan_quotes(paras, chapter, notes):
     return out
 
 
-SENTENCE_END_RE = re.compile(r"[.!?:;]['\"’”)\]]*$")
+SENTENCE_END_RE = re.compile('[.!?:;][\'"\u2018\u2019\u201c\u201d)\]]*$')
 OPEN_END_RE = re.compile(r"[a-z,\-—]$")
-MID_SENTENCE_MIN_WORDS = 6     # shorter lines without an end mark are headings, titles or labels
+MID_SENTENCE_MIN_WORDS = 6     # shorter lines without an end mark are headings, titles or labels (default)
 
 
 def is_title_case(text):
@@ -382,18 +387,20 @@ def is_title_case(text):
     return bool(words) and sum(w[0].isupper() for w in words) * 2 > len(words)
 
 
-def merge_mid_sentence(paras, notes):
+def merge_mid_sentence(paras, notes, min_words=None):
     """[(text, where)] -> same, where a paragraph that stops in the middle of a sentence is joined to the next one.
-    A paragraph never ends inside a sentence: when the one before has no end mark, has at least MID_SENTENCE_MIN_WORDS
+    A paragraph never ends inside a sentence: when the one before has no end mark, has at least min_words
     words and ends in a comma, a hyphen or a dash, or in a lower-case letter while not being a title, the break was a layout gap
     (line spacing, a page or column turn), not the author's. Every join is logged."""
+    if min_words is None:
+        min_words = MID_SENTENCE_MIN_WORDS
     out = []
     for text, where in paras:
         if out and not is_table(text) and not FOOTNOTE_DEF_RE.match(text) and not is_table(out[-1][0]):
             prev, prev_where = out[-1]
             if (not SENTENCE_END_RE.search(prev) and OPEN_END_RE.search(prev)
-                    and len(prev.split()) >= MID_SENTENCE_MIN_WORDS
-                    and (prev[-1] in ",-\u2014" or not is_title_case(prev))):
+                    and len(prev.split()) >= min_words
+                    and (prev[-1] in ",\u2014" or not is_title_case(prev))):
                 sep = "" if prev.endswith(("-", "—")) else " "
                 out[-1] = (prev + sep + text, prev_where)
                 notes.append(("paragraph-joined", where, "paragraph before it stopped mid-sentence, so this one continues "
@@ -518,15 +525,26 @@ def run(book_dir, book, pdf, chapter_numbers):
     return notes
 
 
-def normalize_pages(pages: list[dict], title: str = "", author: str = "") -> tuple[list[dict], list[tuple]]:
+def normalize_pages(pages: list[dict], title: str = "", author: str = "", settings=None) -> tuple[list[dict], list[tuple]]:
     """Normalize parsed pages: strip headers/footers, repair hyphenations, reconstruct paragraphs.
 
     Takes pages from parse_pdf() (each with 'page', 'text', 'images', 'ocr_quality') and
     returns (normalized_pages, notes) where each page's 'text' is cleaned and 'paragraphs'
     is a list of clean paragraph strings.
 
+    Args:
+        pages: Parsed pages from parse_pdf().
+        title: Book title (for header detection).
+        author: Book author (unused currently).
+        settings: NormalizationSettings instance. If None, uses defaults.
+
     This is the key function that brings the old pipeline's text normalization into rev2.
     """
+    from worker.prep.normalization_settings import NormalizationSettings
+
+    if settings is None:
+        settings = NormalizationSettings()
+
     set_language("eng")
 
     # Convert pages to units (the old pipeline's format)
@@ -542,7 +560,7 @@ def normalize_pages(pages: list[dict], title: str = "", author: str = "") -> tup
 
     # Build vocabulary and running headers from all units
     inline = vocabulary(units)
-    running = pageparts.running_lines(units)
+    running = pageparts.running_lines(units, min_units=settings.running_header_min_pages, max_words=settings.running_header_max_words)
 
     notes = []
     normalized_pages = []
@@ -553,7 +571,7 @@ def normalize_pages(pages: list[dict], title: str = "", author: str = "") -> tup
 
         # Detect and remove running header
         drop = set()
-        z = pageparts.header_zone(raw, title, list(running))
+        z = pageparts.header_zone(raw, title, list(running), similarity_threshold=settings.header_title_similarity)
         if z:
             drop.update(range(z[0], z[1]))
             notes.append(("header-removed", where,
@@ -582,8 +600,8 @@ def normalize_pages(pages: list[dict], title: str = "", author: str = "") -> tup
             lines.append({"text": ln.strip(), "indent": len(ln) - len(ln.lstrip()), "where": where,
                           "unit": (unit["pdf_page"], None), "x": None, "y": None})
 
-        # Group into paragraphs
-        paras = paragraphs_from(lines, inline, notes)
+        # Group into paragraphs (uses settings for indent/gap thresholds)
+        paras = paragraphs_from(lines, inline, notes, settings=settings)
 
         # Join lines within each paragraph (handles hyphenation)
         paragraphs = []

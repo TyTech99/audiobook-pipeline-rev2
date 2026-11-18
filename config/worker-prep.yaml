@@ -81,6 +81,31 @@ ocr:
       - Do NOT rewrite or paraphrase — only fix OCR artifacts
       - Return ONLY the cleaned text, no explanations or markdown
 
+# Text normalization thresholds (post-OCR cleanup).
+# These control header/footer detection, paragraph reconstruction, and
+# hyphen repair. Tune per-book if the defaults don't match the layout.
+# Per-job overrides: pass the same keys under metadata.normalization when
+# submitting a job (e.g. {"metadata": {"normalization": {"indent_pt": 6.0}}}).
+normalization:
+  # Paragraph detection (geometric, in points)
+  # A line starts a new paragraph if indented at least this much relative
+  # to the previous line, or sits this much lower than normal line spacing.
+  indent_pt: 4.5
+  gap_pt: 2.5
+  # Line spacing bounds (points). Gaps outside this range are column jumps.
+  pitch_min_pt: 6.0
+  pitch_max_pt: 40.0
+  # Mid-sentence paragraph merging: min words before a break is treated
+  # as mid-sentence (shorter lines are headings/titles).
+  mid_sentence_min_words: 6
+  # Running header detection
+  # A line opening at least this many pages is a running header candidate.
+  running_header_min_pages: 3
+  # Max words in a running header line.
+  running_header_max_words: 12
+  # Title similarity (0-1) for header detection.
+  header_title_similarity: 0.9
+
 epub:
   max_files: 1000
   preserve_images: true

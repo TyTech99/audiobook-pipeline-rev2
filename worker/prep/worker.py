@@ -243,7 +243,18 @@ class PrepWorker:
             self.report_progress(job_id, {"stage": "normalizing", "percent": 42})
             # Normalize text: strip headers/footers, repair hyphenations, reconstruct paragraphs
             from worker.prep.cleanup import normalize_pages
-            doc["pages"], norm_notes = normalize_pages(doc["pages"], title=title_hint, author=author_hint)
+            from worker.prep.normalization_settings import NormalizationSettings
+
+            # Load normalization settings from config, with per-job overrides
+            norm_settings = NormalizationSettings.from_config(self.settings)
+            job_norm_overrides = job.get("metadata", {}).get("normalization")
+            if job_norm_overrides:
+                norm_settings = norm_settings.merge_job_overrides(job_norm_overrides)
+                logger.info("Using per-job normalization overrides: %s", job_norm_overrides)
+
+            doc["pages"], norm_notes = normalize_pages(
+                doc["pages"], title=title_hint, author=author_hint, settings=norm_settings
+            )
             if norm_notes:
                 logger.info("Normalization: %d changes (%d headers, %d page numbers, %d hyphens)",
                             len(norm_notes),

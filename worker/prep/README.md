@@ -29,29 +29,36 @@ The worker reads `config/worker-prep.yaml` (path overridable via `PREP_WORKER_CO
 
 1. **Ingestion**: reads the source document from `file://` URL or absolute path
 2. **Parsing**: PyMuPDF for PDF, built-in parser for EPUB
-3. **Classification**: classifies each page (body text, TOC, front matter, etc.)
-4. **Cover art**: extracts from source, searches Open Library, or generates a placeholder
-5. **Metadata**: extracts from source, scans for ISBN, enriches via Open Library
-6. **LLM analysis**: subject summary, tone analysis, style recommendations (when LLM is configured)
-7. **Package assembly**: builds EPUB, script, ledger, and writes all files to `packages/{job_id}/`
+3. **Normalization**: strips running headers/footers, repairs hyphenations, reconstructs paragraphs (PDF only). Tunable via `normalization:` config or per-job `metadata.normalization` overrides — see [TUNING.md](TUNING.md).
+4. **Classification**: classifies each page (body text, TOC, front matter, etc.)
+5. **Cover art**: extracts from source, searches Open Library, or generates a placeholder
+6. **Metadata**: extracts from source, scans for ISBN, enriches via Open Library
+7. **LLM analysis**: subject summary, tone analysis, style recommendations (when LLM is configured)
+8. **Package assembly**: builds EPUB, script, ledger, and writes all files to `packages/{job_id}/`
 
 ## File layout
 
 ```
 worker/prep/
-├── worker.py            ← Main worker loop (Redis BRPOP)
-├── pdf_parser.py        ← PDF parsing with PyMuPDF
-├── epub_parser.py       ← EPUB parsing
-├── page_ledger.py       ← Page ledger build and validation
-├── narrator_script.py   ← Narrator script build and validation
-├── epub_builder.py      ← Clean EPUB assembly
-├── cover.py             ← Cover extraction, Open Library search, placeholder
-├── metadata_enrich.py   ← ISBN scanning and Open Library lookup
+├── worker.py                  ← Main worker loop (Redis BRPOP)
+├── pdf_parser.py              ← PDF parsing with PyMuPDF
+├── epub_parser.py             ← EPUB parsing
+├── ocr.py                     ← OCR extraction (Tesseract)
+├── cleanup.py                 ← Text normalization pipeline
+├── pageparts.py               ← Header/footer/paragraph detection helpers
+├── normalization_settings.py  ← Normalization settings dataclass
+├── ocr_cleanup.py             ← LLM-based OCR quality cleanup
+├── page_ledger.py             ← Page ledger build and validation
+├── narrator_script.py         ← Narrator script build and validation
+├── epub_builder.py            ← Clean EPUB assembly
+├── cover.py                   ← Cover extraction, Open Library search, placeholder
+├── metadata_enrich.py         ← ISBN scanning and Open Library lookup
 ├── llm/
-│   ├── analyzer.py      ← LLM analysis (subject, tone, style recommendations)
-│   └── prompts.py       ← LLM prompt templates
+│   ├── analyzer.py            ← LLM analysis (subject, tone, style recommendations)
+│   └── prompts.py             ← LLM prompt templates
+├── TUNING.md                  ← Normalization tuning reference
 └── tests/
-    └── test_prep.py     ← Unit tests
+    └── test_prep.py           ← Unit tests
 ```
 
 ## Dependencies

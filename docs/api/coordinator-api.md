@@ -62,6 +62,23 @@ Requires an **operator** key.
 | `input_format` | string | Yes | `pdf` or `epub` |
 | `input_url` | string | Yes | `file://` URL or absolute path to the source document |
 | `metadata` | object | No | Optional metadata. Extracted from the source when omitted. |
+| `metadata.title` | string | No | Book title hint (used for header detection) |
+| `metadata.author` | string | No | Author name hint |
+| `metadata.page_range` | [int, int] | No | 1-based inclusive page range to process (e.g., `[1, 20]`) |
+| `metadata.normalization` | object | No | Per-job text normalization overrides. See [Tuning](../../worker/prep/TUNING.md). |
+
+**Normalization override fields** (all optional, defaults from host config):
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `indent_pt` | float | 4.5 | Minimum indent (pt) for a new paragraph |
+| `gap_pt` | float | 2.5 | Extra vertical gap (pt) for a paragraph break |
+| `pitch_min_pt` | float | 6.0 | Minimum valid line spacing (pt) |
+| `pitch_max_pt` | float | 40.0 | Maximum valid line spacing (pt) |
+| `mid_sentence_min_words` | int | 6 | Min words before auto-joining mid-sentence breaks |
+| `running_min_units` | int | 3 | Min pages a line must repeat to be a running header |
+| `running_max_words` | int | 12 | Max words in a running header candidate |
+| `header_title_similarity` | float | 0.9 | Min similarity to book title for header detection |
 
 **Response (201):**
 

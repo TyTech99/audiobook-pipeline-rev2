@@ -25,7 +25,7 @@ def _mostly_upper(text):
     return (not letters) or sum(c.isupper() for c in letters) / len(letters) > 0.7
 
 
-def header_zone(lines, title, extra_titles=()):
+def header_zone(lines, title, extra_titles=(), similarity_threshold=0.9):
     """The running header at the top of a unit.
     Returns (first_line, last_line_exclusive, page_number or None) or None.
     The header starts at the first non-empty line and runs over the following lines while they are
@@ -62,11 +62,11 @@ def header_zone(lines, title, extra_titles=()):
     if number is not None and _mostly_upper(text) and len(zone) <= 3:
         return i, j, number
     for t in (title,) + tuple(extra_titles):
-        if t and similar(text, t) >= 0.9:
+        if t and similar(text, t) >= similarity_threshold:
             return i, j, None
     if j > i + 1:                          # the header line alone, followed by an upper-case line of the text (a subheading)
         for t in (title,) + tuple(extra_titles):
-            if t and similar(lines[i], t) >= 0.9:
+            if t and similar(lines[i], t) >= similarity_threshold:
                 return i, i + 1, None
     return None
 
