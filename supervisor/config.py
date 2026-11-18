@@ -49,6 +49,8 @@ class SupervisorSettings:
     working_hours: dict
     heartbeat_interval_seconds: int
     idle_timeout_seconds: int
+    log_level: str
+    log_file: str
 
 
 def load_settings(path: str | Path) -> SupervisorSettings:
@@ -115,4 +117,6 @@ def load_settings(path: str | Path) -> SupervisorSettings:
         },
         heartbeat_interval_seconds=int((data.get("heartbeat") or {}).get("interval_seconds") or 30),
         idle_timeout_seconds=int((data.get("idle") or {}).get("timeout_minutes", 5) * 60),
+        log_level=str((data.get("logging") or {}).get("level") or "INFO"),
+        log_file=str((data.get("logging") or {}).get("file") or ""),
     )
