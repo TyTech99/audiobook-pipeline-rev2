@@ -159,6 +159,9 @@ def find_headings(units):
                 # Stop if the line looks like a full sentence (has punctuation, not a title)
                 if len(line_text) > 10 and any(c in line_text for c in ".!?") and not pageparts._mostly_upper(line_text):
                     break
+                # Stop if the line is very long (likely body text, not a title)
+                if len(line_text) > 50:
+                    break
                 title.append(line_text)
                 k += 1
             if len(" ".join(title)) > 100:        # no blank line after the title: keep the leading upper-case lines only
