@@ -507,7 +507,7 @@ def _coordinator_unit(prefix: str) -> str:
         "[Service]\n"
         "Type=oneshot\n"
         "RemainAfterExit=yes\n"
-        f"ExecStart=docker compose -f {prefix}/docker-compose.dev.yml up -d\n"
+        f"ExecStart=docker compose -f {prefix}/docker-compose.dev.yml up -d --build\n"
         f"ExecStop=docker compose -f {prefix}/docker-compose.dev.yml down\n"
         "EnvironmentFile=/etc/audiobook/coordinator.env\n"
     )
