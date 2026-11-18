@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import os
 from uuid import uuid4
 from supervisor.config import SupervisorSettings
 from supervisor.coordinator_client import CoordinatorClient
+
+logger = logging.getLogger(__name__)
 
 
 class ProbeRunner:
@@ -141,6 +144,7 @@ class DockerManager:
         image = self.settings.prep_image if worker_type == "prep" else self.settings.tts_image
         if not image:
             return
+        logger.info("Starting worker: type=%s name=%s image=%s", worker_type, name, image)
         env = {
             "NODE_ID": self.settings.node_id,
             "WORKER_TYPE": worker_type,
@@ -182,6 +186,7 @@ class DockerManager:
 
     def stop_worker(self, worker_type: str) -> None:
         name = f"audiobook-worker-{worker_type}"
+        logger.info("Stopping worker: type=%s name=%s", worker_type, name)
         self.runner.stop_worker(name)
         self.worker_started_at.pop(name, None)
 
