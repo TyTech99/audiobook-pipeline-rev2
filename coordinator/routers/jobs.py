@@ -107,11 +107,12 @@ def _any_principal(principal: Principal = Depends(get_principal)) -> Principal:
 def complete_job(
     job_id: UUID,
     body: JobCompleteIn,
+    request: Request,
     principal: Principal = Depends(_any_principal),
     conn: Connection = Depends(get_conn),
 ):
     worker_id = principal.node_id or "operator"
-    return job_service.complete_job(conn, job_id, body.model_dump(), worker_id)
+    return job_service.complete_job(conn, job_id, body.model_dump(), worker_id, request.app.state.redis)
 
 
 @router.post("/{job_id}/fail")

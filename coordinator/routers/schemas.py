@@ -89,3 +89,4 @@ class JobCompleteIn(BaseModel):
     voice_recipe: dict | None = None
     performance_style: str | None = None
     error: str | None = None
+    claim_token: str | None = None

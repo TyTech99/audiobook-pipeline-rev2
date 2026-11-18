@@ -189,7 +189,24 @@ def mark_in_progress(conn: Connection, job_id, worker_id: str, stage: str) -> di
     return {"status": "ok"}
 
 
-def complete_job(conn: Connection, job_id, body: dict, worker_id: str) -> dict:
+def _verify_claim_token(job_id, body: dict, redis_client: redis.Redis | None) -> None:
+    """Verify the claim token matches the current claim. Rejects stale workers."""
+    token = body.get("claim_token")
+    if token is None or redis_client is None:
+        return  # No token provided or no Redis — skip verification (backward compat)
+    stored = redis_client.hget("job:claims", str(job_id))
+    if stored is None:
+        return  # No claim record — job may have been completed already
+    # Claim record format: "timestamp:token"
+    parts = stored.decode() if isinstance(stored, bytes) else str(stored)
+    if ":" in parts:
+        stored_token = parts.split(":", 1)[1]
+        if stored_token != token:
+            raise ApiError(409, "stale_claim", "job has been re-claimed by another worker", {"status": "reclaimed"})
+
+
+def complete_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client: redis.Redis | None = None) -> dict:
+    _verify_claim_token(job_id, body, redis_client)
     row = _load_job(conn, job_id)
     now = utcnow()
     # Branch on job type so a fresh convert job (status submitted) can finish
@@ -233,6 +250,7 @@ def complete_job(conn: Connection, job_id, body: dict, worker_id: str) -> dict:
 
 
 def fail_job(conn: Connection, job_id, body: dict, worker_id: str, redis_client: redis.Redis, settings: Settings) -> dict:
+    _verify_claim_token(job_id, body, redis_client)
     row = _load_job(conn, job_id)
     now = utcnow()
     error = body.get("error") or "unknown error"

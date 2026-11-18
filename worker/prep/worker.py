@@ -133,8 +133,10 @@ class PrepWorker:
             return None
         job = json.loads(result)
         job_id = job.get("job_id")
-        # Record claim time for the reaper
-        self.redis.hset("job:claims", job_id, time.time())
+        # Generate claim token and record claim for the reaper
+        claim_token = str(uuid.uuid4())
+        job["_claim_token"] = claim_token
+        self.redis.hset("job:claims", job_id, f"{time.time()}:{claim_token}")
         return job
 
     def ack_job(self, job: dict) -> None:
@@ -320,6 +322,7 @@ class PrepWorker:
                 "total_pages": doc["total_pages"],
                 "kept_pages": ledger["summary"]["kept"],
                 "skipped_pages": ledger["summary"]["skipped"],
+                "claim_token": job.get("_claim_token"),
             },
         )
 
@@ -368,7 +371,7 @@ class PrepWorker:
                     self.http.post(
                         f"{self.coordinator_url}/jobs/{job['job_id']}/fail",
                         headers=self._headers(),
-                        json={"error": str(exc)},
+                        json={"error": str(exc), "claim_token": job.get("_claim_token")},
                     )
                 except Exception:
                     pass
