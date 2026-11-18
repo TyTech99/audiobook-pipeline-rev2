@@ -5,13 +5,13 @@ node:
   name: "vps-1"
 
 coordinator:
-  url: "http://coordinator:8000/api/v1"
+  url: "http://127.0.0.1:8000/api/v1"
   api_key: "${API_KEY}"
   coordinator_id: "${COORDINATOR_ID}"
   ca_file: "${COORDINATOR_CA_FILE}"
 
 redis:
-  host: "redis"
+  host: "127.0.0.1"
   port: 6379
   password: "${REDIS_PASSWORD}"
   db: 0

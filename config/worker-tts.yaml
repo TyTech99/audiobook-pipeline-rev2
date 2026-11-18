@@ -6,7 +6,7 @@ worker:
   type: "tts"
 
 redis:
-  host: "redis"
+  host: "127.0.0.1"
   port: 6379
   password: "${REDIS_PASSWORD}"
   db: 0
@@ -30,7 +30,7 @@ storage:
 # OpenAI-compatible LLM interface forwarded into the voice-recipe container
 # for script annotation. Same schema as config/supervisor.yaml.
 llm:
-  base_url: "http://127.0.0.1:8080/v1"
+  base_url: "http://127.0.0.1:8081/v1"
   api_key: ""
   model: "local-model"
   timeout_seconds: 120
