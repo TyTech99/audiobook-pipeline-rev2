@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import uuid
 
@@ -96,9 +97,39 @@ class TTSWorker:
         self.node_id = settings["node_id"]
         self.coordinator_url = settings["coordinator_url"].rstrip("/")
         self.api_key = settings["api_key"]
+        self._heartbeat_thread: threading.Thread | None = None
+        self._heartbeat_stop = threading.Event()
+        self._heartbeat_interval = int(settings.get("heartbeat_interval_seconds", 30))
 
     def _headers(self) -> dict:
         return {"Authorization": f"Bearer {self.api_key}"}
+
+    def _start_job_heartbeat(self, job_id: str) -> None:
+        """Start a background thread that updates the worker heartbeat in Redis."""
+        self._heartbeat_stop.clear()
+
+        def _beat():
+            while not self._heartbeat_stop.is_set():
+                try:
+                    self.redis.set(
+                        f"worker:heartbeat:{self.worker_id}",
+                        json.dumps({"job_id": job_id, "ts": time.time()}),
+                        ex=self._heartbeat_interval * 4,
+                    )
+                except Exception as e:
+                    logger.warning("Heartbeat update failed: %s", e)
+                self._heartbeat_stop.wait(self._heartbeat_interval)
+
+        self._heartbeat_thread = threading.Thread(target=_beat, daemon=True)
+        self._heartbeat_thread.start()
+
+    def _stop_job_heartbeat(self) -> None:
+        """Stop the background heartbeat thread."""
+        self._heartbeat_stop.set()
+        if self._heartbeat_thread:
+            self._heartbeat_thread.join(timeout=5)
+            self._heartbeat_thread = None
+        self.redis.delete(f"worker:heartbeat:{self.worker_id}")
 
     def register(self) -> None:
         response = self.http.post(
@@ -134,8 +165,10 @@ class TTSWorker:
             return None
         job = json.loads(result)
         job_id = job.get("job_id")
-        # Record claim time for the reaper
-        self.redis.hset("job:claims", job_id, time.time())
+        # Generate claim token and record claim for the reaper
+        claim_token = str(uuid.uuid4())
+        job["_claim_token"] = claim_token
+        self.redis.hset("job:claims", job_id, f"{time.time()}:{claim_token}")
         return job
 
     def ack_job(self, job: dict) -> None:
@@ -152,6 +185,13 @@ class TTSWorker:
 
     def process_job(self, job: dict) -> dict:
         job_id = job["job_id"]
+        self._start_job_heartbeat(job_id)
+        try:
+            return self._process_job_inner(job, job_id)
+        finally:
+            self._stop_job_heartbeat()
+
+    def _process_job_inner(self, job: dict, job_id: str) -> dict:
         recipe = job.get("voice_recipe", {})
         image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael:local"
 
@@ -187,7 +227,7 @@ class TTSWorker:
         self.http.post(
             f"{self.coordinator_url}/jobs/{job_id}/complete",
             headers=self._headers(),
-            json={"output_url": output_url},
+            json={"output_url": output_url, "claim_token": job.get("_claim_token")},
         )
 
         return {"job_id": job_id, "output_url": output_url}
@@ -232,7 +272,7 @@ class TTSWorker:
                     self.http.post(
                         f"{self.coordinator_url}/jobs/{job['job_id']}/fail",
                         headers=self._headers(),
-                        json={"error": str(exc)},
+                        json={"error": str(exc), "claim_token": job.get("_claim_token")},
                     )
                 except Exception:
                     pass

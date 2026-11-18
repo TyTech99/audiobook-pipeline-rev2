@@ -46,7 +46,7 @@ def run_reaper(redis_client, visibility_timeout: int, max_retries: int = 3) -> d
             job = json.loads(raw)
             job_id = job.get("job_id")
 
-            # Get claim time from hash
+            # Get claim time from hash (format: "timestamp:token" or legacy "timestamp")
             claimed_at = redis_client.hget(CLAIMS_HASH, job_id)
             if claimed_at is None:
                 # No claim record — treat as stale (legacy job or crashed before hset)
@@ -56,11 +56,22 @@ def run_reaper(redis_client, visibility_timeout: int, max_retries: int = 3) -> d
                 )
                 should_requeue = True
             else:
-                claimed_at_ts = float(claimed_at)
-                should_requeue = claimed_at_ts < stale_threshold
+                claimed_str = claimed_at.decode() if isinstance(claimed_at, bytes) else str(claimed_at)
+                # Parse timestamp (first part before colon, if present)
+                claimed_ts_str = claimed_str.split(":", 1)[0]
+                try:
+                    claimed_at_ts = float(claimed_ts_str)
+                except ValueError:
+                    logger.warning("Job %s has malformed claim record %r, requeueing", job_id, claimed_str)
+                    should_requeue = True
+                else:
+                    should_requeue = claimed_at_ts < stale_threshold
 
             if should_requeue:
-                age = int(now - (float(claimed_at) if claimed_at else now))
+                claimed_str = claimed_at.decode() if isinstance(claimed_at, bytes) else str(claimed_at) if claimed_at else None
+                claimed_ts_str = claimed_str.split(":", 1)[0] if claimed_str else None
+                claimed_ts = float(claimed_ts_str) if claimed_ts_str else now
+                age = int(now - claimed_ts)
                 logger.info(
                     "Job %s stale in %s (age %ds > timeout %ds), requeueing",
                     job_id, processing_queue, age, visibility_timeout,
