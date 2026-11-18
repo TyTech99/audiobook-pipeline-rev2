@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import secrets
+import time
 from pathlib import Path
 
 import yaml
@@ -123,6 +124,25 @@ def apply_llm_to_config_yaml(text: str, llm: dict, *, include_required: bool = F
     if include_required:
         block["required"] = bool(llm.get("required", True))
     data["llm"] = block
+    return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
+
+
+def apply_endpoints_to_config_yaml(text: str, coordinator_url: str, redis_host: str) -> str:
+    """Rewrite coordinator.url and redis.host in a config YAML document.
+
+    Used for standalone installs where the supervisor runs with --network host
+    and must reach the coordinator/redis at 127.0.0.1 instead of Docker
+    service names that don't resolve on the bridge network.
+    """
+    data = yaml.safe_load(text) or {}
+    if coordinator_url:
+        coord = data.get("coordinator") or {}
+        coord["url"] = coordinator_url
+        data["coordinator"] = coord
+    if redis_host:
+        redis = data.get("redis") or {}
+        redis["host"] = redis_host
+        data["redis"] = redis
     return yaml.safe_dump(data, default_flow_style=False, sort_keys=False)
 
 
@@ -328,6 +348,18 @@ def uninstall_coordinator(host, purge: bool, messages: list[str]) -> dict:
     return {"code": EXIT_OK, "changed": True}
 
 
+def _wait_for_coordinator(api, url: str, timeout: int = 120, interval: int = 2) -> bool:
+    """Poll the coordinator health endpoint until it responds or timeout."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            api.health(url)
+            return True
+        except Exception:  # noqa: BLE001 - any failure means not ready yet
+            time.sleep(interval)
+    return False
+
+
 def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
     coordinator_state = dict(state)
     coordinator_state.setdefault("api_url", "http://127.0.0.1:8000/api/v1")
@@ -337,6 +369,9 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
     if result["code"] != EXIT_OK:
         return result
     env = parse_env(host.read(linux_paths()["coordinator_env"]))
+    if not _wait_for_coordinator(api, coordinator_state["api_url"]):
+        messages.append("coordinator not ready; rerun install")
+        return {"code": EXIT_FAILED, "changed": False}
     node_state = {
         "node_id": state.get("node_id") or "local",
         "coordinator_url": coordinator_state["api_url"],
@@ -370,6 +405,8 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
 
 def invite_node(api, coordinator_url: str, operator_key: str, node_id: str, queues: list[str], redis_host: str, redis_port: int, redis_password: str = "") -> dict:
     validate_api_url(coordinator_url)
+    if not _wait_for_coordinator(api, coordinator_url):
+        raise RuntimeError("coordinator not ready; rerun install")
     health = api.health(coordinator_url)
     created = api.invite(
         coordinator_url,
@@ -430,9 +467,17 @@ def _install_supervisor_files(host, prefix: str, state: dict | None = None) -> N
     _copy_tree(host, root / "supervisor", prefix + "/supervisor")
     _copy_tree(host, root / "worker", prefix + "/worker")
     llm = resolve_llm_config(state)
+    coordinator_url = (state or {}).get("coordinator_url") or ""
+    redis_cfg = (state or {}).get("redis") or {}
+    if isinstance(redis_cfg, str):
+        redis_cfg = {"host": redis_cfg}
+    redis_host = str(redis_cfg.get("host") or "") if isinstance(redis_cfg, dict) else ""
     supervisor_yaml = (root / "config" / "supervisor.yaml").read_text()
     prep_yaml = (root / "config" / "worker-prep.yaml").read_text()
     tts_yaml = (root / "config" / "worker-tts.yaml").read_text()
+    supervisor_yaml = apply_endpoints_to_config_yaml(supervisor_yaml, coordinator_url, redis_host)
+    prep_yaml = apply_endpoints_to_config_yaml(prep_yaml, coordinator_url, redis_host)
+    tts_yaml = apply_endpoints_to_config_yaml(tts_yaml, coordinator_url, redis_host)
     host.write(prefix + "/config/supervisor.yaml", apply_llm_to_config_yaml(supervisor_yaml, llm))
     host.write(
         prefix + "/config/worker-prep.yaml",
@@ -470,7 +515,7 @@ def _node_unit(prefix: str) -> str:
         f"ExecStartPre=docker build -t {SUPERVISOR_IMAGE} -f {prefix}/supervisor.Dockerfile {prefix}\n"
         f"ExecStartPre=/bin/sh {prefix}/build-images.sh\n"
         "ExecStartPre=docker rm -f audiobook-supervisor\n"
-        "ExecStart=docker run --name audiobook-supervisor --rm "
+        "ExecStart=docker run --name audiobook-supervisor --rm --network host "
         "-v /var/run/docker.sock:/var/run/docker.sock "
         "-v /var/lib/audiobook:/var/lib/audiobook "
         "--env-file /etc/audiobook/node.env "
