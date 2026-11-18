@@ -42,7 +42,13 @@ class DockerRecipeRunner(RecipeRunner):
         }
         # Use GPU when the host has one; otherwise run CPU-only.
         if os.path.exists("/dev/nvidia0"):
-            kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
+            device = os.environ.get("GPU_DEVICE", "").strip()
+            if device and device.lower() != "all":
+                kwargs["device_requests"] = [
+                    docker.types.GPURequest(device_ids=[d.strip() for d in device.split(",") if d.strip()])
+                ]
+            else:
+                kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
         try:
             container = self.client.containers.run(**kwargs)
         except Exception as exc:

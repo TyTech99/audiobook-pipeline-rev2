@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import os
 from uuid import uuid4
-
 from supervisor.config import SupervisorSettings
 from supervisor.coordinator_client import CoordinatorClient
 
@@ -77,7 +77,15 @@ class DockerProbeRunner(ProbeRunner):
         if extra_devices:
             kwargs["devices"] = extra_devices
         if gpu:
-            kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
+            import docker
+
+            device = os.environ.get("GPU_DEVICE", "").strip()
+            if device and device.lower() != "all":
+                kwargs["device_requests"] = [
+                    docker.types.GPURequest(device_ids=[d.strip() for d in device.split(",") if d.strip()])
+                ]
+            else:
+                kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
         self.client.containers.run(**kwargs)
 
     def stop_worker(self, name: str) -> None:
@@ -146,6 +154,7 @@ class DockerManager:
             "S3_ACCESS_KEY": self.settings.s3_access_key,
             "S3_SECRET_KEY": self.settings.s3_secret_key,
             "STORAGE_ROOT": "/var/lib/audiobook",
+            "GPU_DEVICE": os.environ.get("GPU_DEVICE", ""),
             **self._llm_env(),
         }
         if worker_type == "tts":
