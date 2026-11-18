@@ -29,4 +29,28 @@ def words(lang):
     path = os.path.join(dict_dir(), FILES[lang])
     if not os.path.exists(path):
         raise FileNotFoundError("word list for %s not found at %s (install %s, or set AUDIOBOOK_DICT_DIR)"
-                                % (lang, path, {"enc}
+                                % (lang, path, {"eng": "wamerican-large", "deu": "wngerman", "spa": "wspanish"}[lang]))
+    return _words(path)
+
+
+def tokens(text):
+    return [t.lower().replace("\u2019", "'") for t in WORD_RE.findall(unicodedata.normalize("NFC", text))]
+
+
+def counted(text):
+    """The tokens the share is taken over: words of two letters or more."""
+    return [t for t in tokens(text) if len(t) > 1]
+
+
+def share(text, lang):
+    """Fraction of the text's words (two letters or more) found in the language's dictionary. 0.0 for no words.
+    A word with an apostrophe also counts when the part before it is a word ("author's")."""
+    toks = counted(text)
+    if not toks:
+        return 0.0
+    d = words(lang)
+    return sum(t in d or t.split("'")[0] in d for t in toks) / len(toks)
+
+
+def shares(text):
+    return {lang: share(text, lang) for lang in LANGUAGES}

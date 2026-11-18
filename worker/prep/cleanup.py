@@ -5,16 +5,19 @@ import json
 import os
 import re
 
-from spellchecker import SpellChecker
+try:
+    from spellchecker import SpellChecker
+    _dict = SpellChecker()
+except ImportError:
+    _dict = None
 
-from pipeline.book import bookio
-from pipeline.text import dicts
-from pipeline.text import pageparts
-from pipeline.text import pdftext
-from pipeline.text import structure
+from worker.prep import bookio_old as bookio
+from worker.prep import dicts
+from worker.prep import pageparts
+from worker.prep import pdftext_old as pdftext
+from worker.prep import structure
 
 WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
-_dict = SpellChecker()
 _language = {"code": "eng"}      # the book being cleaned; set by run()
 
 
@@ -24,6 +27,8 @@ def set_language(code):
 
 
 def known(word):
+    if _dict is None:
+        return True  # Can't check without spellchecker; assume known
     if _language["code"] == "eng":
         return bool(_dict.known([word.lower()]))
     return word.lower() in dicts.words(_language["code"])
@@ -511,3 +516,103 @@ def run(book_dir, book, pdf, chapter_numbers):
         ch["words"] = sum(len(t.split()) for t in texts)
         ch["paragraphs"] = len(texts)
     return notes
+
+
+def normalize_pages(pages: list[dict], title: str = "", author: str = "") -> tuple[list[dict], list[tuple]]:
+    """Normalize parsed pages: strip headers/footers, repair hyphenations, reconstruct paragraphs.
+
+    Takes pages from parse_pdf() (each with 'page', 'text', 'images', 'ocr_quality') and
+    returns (normalized_pages, notes) where each page's 'text' is cleaned and 'paragraphs'
+    is a list of clean paragraph strings.
+
+    This is the key function that brings the old pipeline's text normalization into rev2.
+    """
+    set_language("eng")
+
+    # Convert pages to units (the old pipeline's format)
+    units = []
+    for p in pages:
+        units.append({
+            "pdf_page": p["page"],
+            "half": None,
+            "text": p["text"],
+            "geom": None,
+            "normalized": {},
+        })
+
+    # Build vocabulary and running headers from all units
+    inline = vocabulary(units)
+    running = pageparts.running_lines(units)
+
+    notes = []
+    normalized_pages = []
+
+    for unit in units:
+        raw = [l.rstrip() for l in unit["text"].split("\n")]
+        where = "pdf p.%d" % unit["pdf_page"]
+
+        # Detect and remove running header
+        drop = set()
+        z = pageparts.header_zone(raw, title, list(running))
+        if z:
+            drop.update(range(z[0], z[1]))
+            notes.append(("header-removed", where,
+                          "running header '%s'" % " ".join(l.strip() for l in raw[z[0]:z[1]])))
+
+        # Detect and remove footer page number
+        f = pageparts.footer_number(raw)
+        if f:
+            drop.add(f[0])
+            notes.append(("page-number-removed", where, "footer page number %d" % f[1]))
+        else:
+            r = pageparts.footer_roman(raw)
+            if r:
+                drop.add(r[0])
+                notes.append(("page-number-removed", where, "footer page number %s (roman)" % r[1]))
+
+        # Build clean lines (skip dropped lines and ornaments)
+        lines = []
+        for i, ln in enumerate(raw):
+            if i in drop or not ln.strip():
+                continue
+            if pageparts.ORNAMENT_RE.match(ln):
+                lines.append({"text": "", "ornament": True, "indent": 0, "where": where,
+                              "unit": (unit["pdf_page"], None), "x": None, "y": None})
+                continue
+            lines.append({"text": ln.strip(), "indent": len(ln) - len(ln.lstrip()), "where": where,
+                          "unit": (unit["pdf_page"], None), "x": None, "y": None})
+
+        # Group into paragraphs
+        paras = paragraphs_from(lines, inline, notes)
+
+        # Join lines within each paragraph (handles hyphenation)
+        paragraphs = []
+        for p in paras:
+            t = join_lines(p, inline, notes)
+            t = fix_midline_hyphens(t, where, notes, inline)
+            t = fix_quotes(t, where, notes)
+            t = re.sub(r"\s+", " ", t).strip()
+            if t:
+                paragraphs.append(t)
+
+        # Normalize characters (soft hyphens, etc.)
+        clean_text, changed = pdftext.normalize_chars("\n".join(paragraphs))
+        if changed:
+            notes.append(("characters-normalized", where,
+                          ", ".join("%d x U+%04X" % (n, ord(c)) for c, n in sorted(changed.items()))))
+
+        normalized_pages.append({
+            "page": unit["pdf_page"],
+            "text": clean_text,
+            "paragraphs": paragraphs,
+            "images": 0,  # will be filled from original
+        })
+
+    # Copy over non-text fields from original pages
+    for orig, norm in zip(pages, normalized_pages):
+        norm["images"] = orig.get("images", 0)
+        norm["ocr_quality"] = orig.get("ocr_quality")
+        norm["action"] = orig.get("action")
+        norm["reason"] = orig.get("reason")
+
+    return normalized_pages, notes

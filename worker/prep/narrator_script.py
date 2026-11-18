@@ -84,7 +84,11 @@ def build_narrator_script(
                 continue
 
             text = page["text"]
-            paragraphs = _split_paragraphs(text)
+            # Use normalized paragraphs if available (from cleanup.normalize_pages)
+            if page.get("paragraphs"):
+                paragraphs = page["paragraphs"]
+            else:
+                paragraphs = _split_paragraphs(text)
             for para in paragraphs:
                 para = para.strip()
                 if not para or len(para) < 3:

@@ -236,6 +236,20 @@ class PrepWorker:
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.check_cancelled(job_id)
+            # Extract metadata early (needed for normalization header detection)
+            metadata = doc["metadata"]
+            title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
+            author_hint = metadata.get("author") or job.get("metadata", {}).get("author") or ""
+            self.report_progress(job_id, {"stage": "normalizing", "percent": 42})
+            # Normalize text: strip headers/footers, repair hyphenations, reconstruct paragraphs
+            from worker.prep.cleanup import normalize_pages
+            doc["pages"], norm_notes = normalize_pages(doc["pages"], title=title_hint, author=author_hint)
+            if norm_notes:
+                logger.info("Normalization: %d changes (%d headers, %d page numbers, %d hyphens)",
+                            len(norm_notes),
+                            sum(1 for n in norm_notes if n[0] == "header-removed"),
+                            sum(1 for n in norm_notes if n[0] == "page-number-removed"),
+                            sum(1 for n in norm_notes if n[0] in ("hyphen-joined", "hyphen-unresolved")))
             self.report_progress(job_id, {"stage": "classifying", "percent": 45})
             for page in doc["pages"]:
                 action, reason = classify_page(page)
