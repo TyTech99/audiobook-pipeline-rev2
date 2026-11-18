@@ -40,6 +40,10 @@ class FakeApi:
         self.calls.append(("invite", body["node_id"]))
         return {"node_api_key": self.node_key, "coordinator_id": self.coordinator_id, "node_id": body["node_id"]}
 
+    def patch_node(self, url, operator_key, node_id, body):
+        self.calls.append(("patch_node", node_id, body))
+        return {"node_id": node_id, **body}
+
     def drain(self, url, operator_key, node_id):
         self.calls.append(("drain", node_id))
 
@@ -258,6 +262,14 @@ def test_standalone_invites_a_local_node_and_checks_its_key():
     assert supervisor["llm"]["model"] == "qwen-local"
     assert supervisor["llm"]["api_key"] == "llm-key"
     assert ("health", "http://127.0.0.1:8000/api/v1") in api.calls
+    # Standalone install must align working_hours and allowed_queues with the
+    # state file even if the node row already existed.
+    patch_calls = [c for c in api.calls if c[0] == "patch_node"]
+    assert len(patch_calls) == 1
+    _, patched_id, patched_body = patch_calls[0]
+    assert patched_id == "local"
+    assert patched_body["allowed_queues"] == ["prep"]
+    assert patched_body["working_hours"] == {"enabled": False, "start": "00:00", "end": "23:59", "timezone": "UTC"}
 
 
 def test_node_install_writes_llm_into_config_yaml():

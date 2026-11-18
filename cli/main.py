@@ -48,6 +48,18 @@ class LiveApi:
         response.raise_for_status()
         return response.json()
 
+    def patch_node(self, url: str, operator_key: str, node_id: str, body: dict) -> dict:
+        import httpx
+
+        response = httpx.patch(
+            url.rstrip("/") + f"/nodes/{node_id}",
+            headers={"Authorization": f"Bearer {operator_key}"},
+            json=body,
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
+
     def drain(self, url: str, operator_key: str, node_id: str) -> None:
         import httpx
 

@@ -398,6 +398,17 @@ def install_standalone(host, state: dict, api, messages: list[str]) -> dict:
         },
     )
     node_state["node_api_key"] = invited["node_api_key"]
+    # Ensure working_hours and allowed_queues match the state file even if the
+    # node row already existed (e.g. coordinator reinstalled, node row persisted).
+    api.patch_node(
+        node_state["coordinator_url"],
+        env["API_KEY_OPERATOR"],
+        node_state["node_id"],
+        {
+            "allowed_queues": node_state["queues"],
+            "working_hours": node_state["working_hours"],
+        },
+    )
     node_result = install_node(host, node_state, api, messages)
     node_result["invited"] = True
     return node_result
