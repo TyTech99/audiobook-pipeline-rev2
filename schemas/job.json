@@ -6,7 +6,7 @@
   "properties": {
     "type": {
       "type": "string",
-      "enum": ["pdf_to_audiobook", "epub_to_audiobook", "pdf_to_epub", "epub_to_script"]
+      "enum": ["prep", "convert"]
     },
     "input_format": {
       "type": "string",
@@ -14,33 +14,17 @@
     },
     "input_url": {
       "type": "string",
-      "format": "uri",
-      "pattern": "^s3://"
-    },
-    "options": {
-      "type": "object",
-      "properties": {
-        "output_format": {
-          "type": "string",
-          "enum": ["mp3", "m4b", "wav"],
-          "default": "mp3"
-        },
-        "bitrate": {
-          "type": "string",
-          "default": "192k"
-        },
-        "narration_policy": {
-          "type": "string",
-          "default": "default"
-        }
-      }
+      "description": "file:// URL or absolute path. For convert jobs, this is the package_url from the prep job."
     },
     "metadata": {
       "type": "object",
       "properties": {
         "title": {"type": "string"},
         "author": {"type": "string"},
-        "customer_id": {"type": "string"}
+        "language": {"type": "string"},
+        "customer_id": {"type": "string"},
+        "performance_style": {"type": "string"},
+        "voice_recipe": {"type": "object"}
       }
     }
   }

@@ -1,115 +1,184 @@
 # Job Schema
 
-## Two-Phase Job Model
+## Two separate job types
 
-A job has two distinct phases. They are separate, sequential, and the second phase depends on the first.
+The pipeline has two job types. Each is submitted independently via `POST /jobs`.
 
-### Phase 1: Prep (Source Document → Book Package)
+- **Prep**: source document → book package. Status ends at `prep_complete`.
+- **Convert**: book package → audiobook. Status ends at `complete`.
 
-- **Input**: PDF or EPUB (minimum submission requirement)
-- **Output**: Book package (clean EPUB, narrator script, page ledger, cover art, metadata, LLM analysis)
+The convert job takes the `package_url` from the prep job as its `input_url`.
 
-### Phase 2: Audio (Book Package → Audiobook)
+## Prep job
 
-- **Input**: Book package + voice recipe + performance style
-- **Output**: Audiobook package (M4B file, MP3 chapters, credits, sample, metadata, QC report)
-
-## Job Payload
-
-### Phase 1 Submission
+### Submission
 
 ```json
 {
   "type": "prep",
   "input_format": "pdf",
-  "input_url": "s3://bucket/path/to/book.pdf",
+  "input_url": "file:///var/lib/audiobook/input/book.pdf",
   "metadata": {
     "title": "Optional title override",
     "author": "Optional author override",
-    "genre": "Optional genre",
-    "description": "Optional description",
     "language": "en",
-    "year": "2026",
     "customer_id": "customer-123"
   }
 }
 ```
 
-### Phase 1 Fields
+### Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `type` | string | Yes | `prep` |
 | `input_format` | string | Yes | `pdf` or `epub` |
-| `input_url` | string | Yes | S3 URL of the input file |
-| `metadata` | object | No | Optional metadata (extracted when omitted) |
+| `input_url` | string | Yes | `file://` URL or absolute path to the source document |
+| `metadata` | object | No | Optional metadata. Extracted from the source when omitted. |
 | `metadata.title` | string | No | Book title |
 | `metadata.author` | string | No | Author name |
-| `metadata.genre` | string | No | Genre |
-| `metadata.description` | string | No | Book summary |
 | `metadata.language` | string | No | Language code (e.g., `en`) |
-| `metadata.year` | string | No | Publication year |
 | `metadata.customer_id` | string | No | Customer identifier |
 
-### Phase 2 Submission
+### Queue message
 
-```json
-{
-  "type": "convert",
-  "book_package_id": "uuid",
-  "voice_recipe": {
-    "name": "narrator-deep-male-v2",
-    "version": "2.1.0"
-  },
-  "performance_style": "noir-mystery"
-}
-```
-
-### Phase 2 Fields
-
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | Yes | `convert` |
-| `book_package_id` | string | Yes | Reference to the Phase 1 output |
-| `voice_recipe` | object | Yes | Voice recipe to use |
-| `voice_recipe.name` | string | Yes | Recipe name |
-| `voice_recipe.version` | string | Yes | Recipe version |
-| `performance_style` | string | Yes | Performance style (validated against recipe's supported styles) |
-
-## Job State Machine
-
-```
-submitted → in_progress → prep_complete → converting → complete
-                │               │
-                │               └→ convert_failed
-                │
-                └→ failed
-```
-
-### States
-
-| State | Description |
-|-------|-------------|
-| `submitted` | Job accepted by coordinator, waiting in queue |
-| `in_progress` | Prep worker is processing the job |
-| `prep_complete` | Book package created, waiting for Phase 2 submission |
-| `converting` | TTS worker is generating audio |
-| `complete` | Audiobook ready |
-| `failed` | Job failed after max retries |
-| `convert_failed` | Prep succeeded but TTS failed |
-
-## Job Record (Coordinator Database)
+The coordinator pushes this to the Redis `prep` queue:
 
 ```json
 {
   "job_id": "uuid",
-  "type": "pdf_to_audiobook",
+  "type": "prep",
+  "input_format": "pdf",
+  "input_url": "file:///var/lib/audiobook/input/book.pdf",
+  "output_prefix": "file:///var/lib/audiobook/packages/{job_id}/",
+  "metadata": {},
+  "created_at": "2026-11-17T09:59:00Z"
+}
+```
+
+### Completion
+
+The prep worker POSTs to `/jobs/{job_id}/complete`:
+
+```json
+{
+  "package_url": "file:///var/lib/audiobook/packages/{job_id}/",
+  "total_pages": 342,
+  "kept_pages": 318,
+  "skipped_pages": 24
+}
+```
+
+The job status moves to `prep_complete` and `package_url` is stored.
+
+## Convert job
+
+### Submission
+
+```json
+{
+  "type": "convert",
+  "input_format": "epub",
+  "input_url": "file:///var/lib/audiobook/packages/{prep_job_id}/",
+  "metadata": {
+    "performance_style": "neutral",
+    "voice_recipe": {}
+  }
+}
+```
+
+### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | `convert` |
+| `input_format` | string | Yes | `epub` (the book package format) |
+| `input_url` | string | Yes | `package_url` from the prep job |
+| `metadata` | object | No | Optional. See below. |
+| `metadata.performance_style` | string | No | Performance style (default `neutral`) |
+| `metadata.voice_recipe` | object | No | Voice recipe override. Empty object uses the default recipe image. |
+
+The coordinator copies `input_url` to `package_url` in the database and in the queue message so TTS workers can read the package without remapping.
+
+### Queue message
+
+The coordinator pushes this to the Redis `convert` queue:
+
+```json
+{
+  "job_id": "uuid",
+  "type": "convert",
+  "input_url": "file:///var/lib/audiobook/packages/{prep_job_id}/",
+  "package_url": "file:///var/lib/audiobook/packages/{prep_job_id}/",
+  "output_prefix": "file:///var/lib/audiobook/audio/{job_id}/",
+  "voice_recipe": {},
+  "performance_style": "neutral",
+  "metadata": {},
+  "created_at": "2026-11-17T10:05:00Z"
+}
+```
+
+### Completion
+
+The TTS worker POSTs to `/jobs/{job_id}/complete`:
+
+```json
+{
+  "output_url": "file:///var/lib/audiobook/audio/{job_id}/"
+}
+```
+
+The job status moves to `complete` and `output_url` is stored.
+
+## Job state machine
+
+### Prep job
+
+```
+submitted → in_progress → prep_complete
+     │            │
+     │            └→ failed (after max retries)
+     │
+     └→ cancelled
+```
+
+### Convert job
+
+```
+submitted → converting → complete
+     │            │
+     │            └→ convert_failed (after max retries)
+     │
+     └→ cancelled
+```
+
+### States
+
+| State | Applies to | Description |
+|-------|------------|-------------|
+| `submitted` | both | Job accepted by coordinator, waiting in queue |
+| `in_progress` | prep | Prep worker is processing the job |
+| `prep_complete` | prep | Book package created. Terminal for prep. |
+| `converting` | convert | TTS worker is generating audio |
+| `complete` | convert | Audiobook ready. Terminal for convert. |
+| `failed` | prep | Job failed after max retries |
+| `convert_failed` | convert | TTS failed after max retries |
+| `cancelled` | both | Job cancelled by operator |
+
+On failure before max retries, the job returns to `submitted` and is requeued.
+
+## Job record (coordinator database)
+
+```json
+{
+  "job_id": "uuid",
+  "type": "prep",
   "status": "prep_complete",
   "input_format": "pdf",
-  "input_url": "s3://bucket/path/to/book.pdf",
-  "package_url": "s3://bucket/packages/{job_id}/",
+  "input_url": "file:///var/lib/audiobook/input/book.pdf",
+  "package_url": "file:///var/lib/audiobook/packages/{job_id}/",
   "output_url": null,
-  "metadata": {...},
+  "metadata": {},
   "prep": {
     "worker_id": "worker-abc",
     "started_at": "2026-11-17T10:00:00Z",
@@ -118,14 +187,8 @@ submitted → in_progress → prep_complete → converting → complete
     "kept_pages": 318,
     "skipped_pages": 24
   },
-  "convert": {
-    "worker_id": null,
-    "voice_recipe": null,
-    "performance_style": null,
-    "started_at": null,
-    "completed_at": null,
-    "progress": null
-  },
+  "convert": {},
+  "progress": {},
   "error": null,
   "retry_count": 0,
   "created_at": "2026-11-17T09:59:00Z",
@@ -133,46 +196,15 @@ submitted → in_progress → prep_complete → converting → complete
 }
 ```
 
-## Queue Message Format
+For a convert job, `type` is `convert`, `status` is `complete`, `output_url` is set, and the `convert` object contains `worker_id`, `started_at`, `completed_at`, `voice_recipe`, and `performance_style`.
 
-### Prep Queue Message
+## Progress reporting
 
-```json
-{
-  "job_id": "uuid",
-  "type": "prep",
-  "input_format": "pdf",
-  "input_url": "s3://bucket/path/to/book.pdf",
-  "output_prefix": "s3://bucket/packages/{job_id}/",
-  "metadata": {...},
-  "created_at": "2026-11-17T09:59:00Z"
-}
-```
+Workers report progress via `POST /jobs/{job_id}/progress`. Only valid when the job is `in_progress` (prep) or `converting` (convert).
 
-### Convert Queue Message
+### Prep progress
 
 ```json
-{
-  "job_id": "uuid",
-  "type": "convert",
-  "package_url": "s3://bucket/packages/{job_id}/",
-  "output_prefix": "s3://bucket/audio/{job_id}/",
-  "voice_recipe": {
-    "name": "narrator-deep-male-v2",
-    "version": "2.1.0",
-    "image": "registry.example.com/audiobook/voice-deep-male-v2@sha256:..."
-  },
-  "performance_style": "noir-mystery",
-  "created_at": "2026-11-17T10:05:00Z"
-}
-```
-
-## Progress Reporting
-
-Workers report progress via the coordinator API:
-
-```json
-POST /jobs/{job_id}/progress
 {
   "stage": "prep",
   "percent": 45,
@@ -182,10 +214,9 @@ POST /jobs/{job_id}/progress
 }
 ```
 
-For TTS jobs:
+### Convert progress
 
 ```json
-POST /jobs/{job_id}/progress
 {
   "stage": "convert",
   "percent": 62,

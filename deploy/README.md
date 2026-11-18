@@ -29,6 +29,33 @@ The CLI writes these values to `/etc/audiobook/coordinator.env` on the coordinat
 sudo awk -F= '/^(COORDINATOR_ID|API_KEY_OPERATOR|REDIS_PASSWORD)=/ {print}' /etc/audiobook/coordinator.env
 ```
 
+## Config
+
+### LLM
+
+The `llm:` block in `config/supervisor.yaml`, `config/worker-prep.yaml`, and `config/worker-tts.yaml`. The supervisor reads its own copy and injects `LLM_*` env vars into worker and recipe containers.
+
+```yaml
+llm:
+  base_url: "http://127.0.0.1:8080/v1"
+  api_key: ""
+  model: "local-model"
+  timeout_seconds: 120
+  slots: 4
+```
+
+The endpoint must speak OpenAI-compatible chat completions. At install, an optional `llm:` block in the state file seeds these YAML files under the node prefix. After install, edit the YAML files directly.
+
+### Storage
+
+Local file storage under `STORAGE_ROOT`, default `/var/lib/audiobook`. Prep packages go to `packages/{job_id}/`, audio output goes to `audio/{job_id}/`. No S3 required.
+
+### Secrets
+
+- `API_KEY_OPERATOR` in `/etc/audiobook/coordinator.env` (coordinator host)
+- `API_KEY` (node key) in `/etc/audiobook/node.env` (node host)
+- `REDIS_PASSWORD` in both env files
+
 ## How to install standalone
 
 Use this when one Debian or Ubuntu host runs the coordinator and the only node.
@@ -129,6 +156,7 @@ sudo cp deploy/examples/node.example.yaml /etc/audiobook/node.yaml
    - `operator_api_key` to `API_KEY_OPERATOR`, so a later uninstall can drain the node
    - `redis.host` to the coordinator's private IP
    - `redis.password` to `REDIS_PASSWORD`
+   - optional `llm:` block to seed `config/supervisor.yaml` and `config/worker-*.yaml`
 
 5. Install as root.
 
@@ -177,6 +205,10 @@ Exit code 4 means Docker Desktop was installed and Windows wants a reboot. Reboo
 
 The task name is `AudiobookSupervisor`. It runs at startup as SYSTEM. Start Docker Desktop before you run the task, or the container exits.
 
+## Usage
+
+Job submission and polling live in the [root README](../README.md#usage). The coordinator API reference is in [docs/api/coordinator-api.md](../docs/api/coordinator-api.md).
+
 ## Accept checks
 
 Run `deploy/accept-dev.sh` on a dev stand. It checks health, auth, and the node list. For a full accept procedure, see `docs/architecture/commissioning.md`.
@@ -185,14 +217,31 @@ Run `deploy/accept-dev.sh` on a dev stand. It checks health, auth, and the node 
 
 - `coordinator.Dockerfile` builds the coordinator image. The CLI copies it to the coordinator prefix during install.
 - `supervisor.Dockerfile` builds the supervisor image. The CLI copies it to the node prefix and the systemd unit builds it on first start.
+- `worker-prep.Dockerfile` builds the prep worker image (`audiobook-worker-prep:local`). The CLI copies it to the node prefix and `build-images.sh` builds it before the supervisor starts.
+- `worker-tts.Dockerfile` builds the TTS worker image (`audiobook-worker-tts:local`). The TTS container mounts `/var/run/docker.sock` at runtime so it can launch recipe containers.
+- `recipe-michael.Dockerfile` builds the Chatterbox michael voice recipe image (`audiobook-recipe-michael:local`).
 - `probe.Dockerfile` builds the probe image. The supervisor uses it for throwaway container checks.
+- `build-images.sh` builds all local worker, recipe, and probe images. The node systemd unit calls it in `ExecStartPre` before starting the supervisor.
 - `docker-compose.dev.yml` runs Redis, Postgres, and the coordinator. The CLI copies it to the coordinator prefix and rewrites the Redis bind address.
 - `audiobook-supervisor.service` is the systemd unit for the supervisor. The CLI installs it on Linux nodes.
 - `accept-dev.sh` is a manual health check for a coordinator on localhost.
 - `dev.env.example` is a template for the env file the compose project reads. The CLI generates the real env file; this template is for manual compose runs.
 
+## Image tags and overrides
+
+The supervisor reads image tags from `config/supervisor.yaml` under `docker.images`. Env vars override the YAML values:
+
+| Env var | Default tag | Used by |
+| --- | --- | --- |
+| `PREP_IMAGE` | `audiobook-worker-prep:local` | Prep worker containers |
+| `TTS_IMAGE` | `audiobook-worker-tts:local` | TTS worker containers |
+| `RECIPE_IMAGE` | `audiobook-recipe-michael:local` | Injected as `DEFAULT_RECIPE_IMAGE` into TTS workers |
+| `PROBE_IMAGE` | `audiobook-probe:dev` | Probe containers |
+
+Set these in `/etc/audiobook/node.env` to point at a different registry or tag.
+
 ## See also
 
-- Root README for prerequisites and the compact standalone recipe.
+- Root README for prerequisites, config, and usage.
 - `docs/architecture/commissioning.md` for the credential model, node states, and decommission.
 - `docs/api/coordinator-api.md` for the invite and register endpoints.

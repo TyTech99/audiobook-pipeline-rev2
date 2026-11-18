@@ -20,35 +20,32 @@ Two classes, defined in [ADR-005](../decisions/005-node-commissioning.md):
 
 | Class | Held by | Can call |
 | --- | --- | --- |
-| Operator | Coordinator config | Jobs, list and read endpoints, node invite, patch, probe, rotate-key, drain, decommission |
-| Node | One node, in `/etc/audiobook/node.env` | Node register and heartbeat, worker register, heartbeat, and unregister, probe failure, job progress |
+| Operator | `/etc/audiobook/coordinator.env` as `API_KEY_OPERATOR` | Jobs, list and read endpoints, node invite, patch, probe, rotate-key, drain, decommission |
+| Node | `/etc/audiobook/node.env` as `API_KEY` | Node register and heartbeat, worker register, heartbeat, and unregister, probe failure, job progress, job complete, job fail |
 
 `GET /health` takes no key. It returns `coordinator_id` and no keys. Every other endpoint returns 401 when the key is missing, unknown, or the wrong class for that route.
 
 A worker or supervisor cannot create a node. `POST /nodes` with an operator key is the only authorization. Register calls with a missing bearer, an operator key, or a key for a node that was never invited return 401 and write nothing.
 
-The coordinator stores SHA-256 hashes of keys. Node keys are created by `POST /nodes` and are not listed in `config/coordinator.yaml`. Operator keys are `auth.operator_api_keys`.
+The coordinator stores SHA-256 hashes of keys. Node keys are created by `POST /nodes` and are not listed in `config/coordinator.yaml`. Operator keys are `auth.operator_api_keys` in `config/coordinator.yaml`.
 
 ## Jobs
 
-### Submit a Job
+### Submit a prep job
 
 ```
 POST /jobs
 ```
 
+Requires an **operator** key.
+
 **Request:**
 
 ```json
 {
-  "type": "pdf_to_audiobook",
+  "type": "prep",
   "input_format": "pdf",
-  "input_url": "s3://bucket/path/to/book.pdf",
-  "options": {
-    "output_format": "mp3",
-    "bitrate": "192k",
-    "narration_policy": "default"
-  },
+  "input_url": "file:///var/lib/audiobook/input/book.pdf",
   "metadata": {
     "title": "The Castle",
     "author": "Jane Doe",
@@ -56,6 +53,15 @@ POST /jobs
   }
 }
 ```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | `prep` |
+| `input_format` | string | Yes | `pdf` or `epub` |
+| `input_url` | string | Yes | `file://` URL or absolute path to the source document |
+| `metadata` | object | No | Optional metadata. Extracted from the source when omitted. |
 
 **Response (201):**
 
@@ -67,23 +73,69 @@ POST /jobs
 }
 ```
 
-### Get Job Status
+### Submit a convert job
+
+```
+POST /jobs
+```
+
+Requires an **operator** key. The `input_url` is the `package_url` returned by a completed prep job.
+
+**Request:**
+
+```json
+{
+  "type": "convert",
+  "input_format": "epub",
+  "input_url": "file:///var/lib/audiobook/packages/{prep_job_id}/",
+  "metadata": {
+    "performance_style": "neutral",
+    "voice_recipe": {}
+  }
+}
+```
+
+**Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | `convert` |
+| `input_format` | string | Yes | `epub` (the book package format) |
+| `input_url` | string | Yes | `package_url` from the prep job |
+| `metadata` | object | No | Optional. See below. |
+| `metadata.performance_style` | string | No | Performance style (default `neutral`). Validated against the recipe's supported styles. |
+| `metadata.voice_recipe` | object | No | Voice recipe override. Empty object uses the default recipe image. |
+
+**Response (201):**
+
+```json
+{
+  "job_id": "uuid",
+  "status": "submitted",
+  "created_at": "2026-11-17T10:00:00Z"
+}
+```
+
+### Get job status
 
 ```
 GET /jobs/{job_id}
 ```
+
+Requires an **operator** key.
 
 **Response (200):**
 
 ```json
 {
   "job_id": "uuid",
-  "type": "pdf_to_audiobook",
+  "type": "prep",
   "status": "prep_complete",
   "input_format": "pdf",
-  "input_url": "s3://bucket/path/to/book.pdf",
-  "package_url": "s3://bucket/packages/{job_id}/",
+  "input_url": "file:///var/lib/audiobook/input/book.pdf",
+  "package_url": "file:///var/lib/audiobook/packages/{job_id}/",
   "output_url": null,
+  "metadata": {},
   "prep": {
     "worker_id": "worker-abc",
     "started_at": "2026-11-17T10:00:00Z",
@@ -92,33 +144,33 @@ GET /jobs/{job_id}
     "kept_pages": 318,
     "skipped_pages": 24
   },
-  "convert": {
-    "worker_id": null,
-    "voice_recipe": null,
-    "started_at": null,
-    "completed_at": null,
-    "progress": null
-  },
+  "convert": {},
+  "progress": {},
   "error": null,
+  "retry_count": 0,
   "created_at": "2026-11-17T09:59:00Z",
   "updated_at": "2026-11-17T10:05:00Z"
 }
 ```
 
-### List Jobs
+For a convert job, `status` is `complete` and `output_url` is set when finished.
+
+### List jobs
 
 ```
 GET /jobs?status=prep_complete&limit=50&offset=0
 ```
+
+Requires an **operator** key.
 
 **Query Parameters:**
 
 | Param | Type | Default | Description |
 |-------|------|---------|-------------|
 | `status` | string | all | Filter by status |
-| `limit` | int | 50 | Max results |
+| `limit` | int | 50 | Max results (1-200) |
 | `offset` | int | 0 | Pagination offset |
-| `customer_id` | string | - | Filter by customer |
+| `customer_id` | string | - | Filter by `metadata.customer_id` |
 
 **Response (200):**
 
@@ -131,31 +183,13 @@ GET /jobs?status=prep_complete&limit=50&offset=0
 }
 ```
 
-### Get Job Page Ledger
-
-```
-GET /jobs/{job_id}/page-ledger
-```
-
-**Response (200):**
-
-Returns the page ledger JSON (see [page-ledger.md](../data-models/page-ledger.md)).
-
-### Get Job Script
-
-```
-GET /jobs/{job_id}/script
-```
-
-**Response (200):**
-
-Returns the narrator script JSON (see [narrator-script.md](../data-models/narrator-script.md)).
-
-### Cancel a Job
+### Cancel a job
 
 ```
 POST /jobs/{job_id}/cancel
 ```
+
+Requires an **operator** key. Only jobs not in a terminal state can be cancelled.
 
 **Response (200):**
 
@@ -168,7 +202,7 @@ POST /jobs/{job_id}/cancel
 
 ## Workers
 
-### Register a Worker
+### Register a worker
 
 ```
 POST /workers/register
@@ -184,18 +218,9 @@ Requires a **node** key. `node_id` must already be `commissioned` or `offline`. 
   "node_id": "vps-1",
   "type": "prep",
   "capabilities": {
-    "cpu": 8,
-    "ram_gb": 15,
-    "gpu": null,
-    "tools": {"pdf_to_epub": true, "tts": false},
-    "models": []
+    "llm_slots": 4
   },
-  "queues": ["prep"],
-  "working_hours": {
-    "start": "22:00",
-    "end": "08:00",
-    "timezone": "America/New_York"
-  }
+  "queues": ["prep"]
 }
 ```
 
@@ -208,13 +233,14 @@ Requires a **node** key. `node_id` must already be `commissioned` or `offline`. 
 }
 ```
 
-### Worker Heartbeat
+### Worker heartbeat
 
 ```
 POST /workers/{worker_id}/heartbeat
 ```
 
 Requires the node key for the worker's `node_id`. A probe container sends `"status": "probe_ok"` once, then exits.
+
 **Request:**
 
 ```json
@@ -234,11 +260,13 @@ Requires the node key for the worker's `node_id`. A probe container sends `"stat
 }
 ```
 
-### List Workers
+### List workers
 
 ```
 GET /workers?status=online&type=prep
 ```
+
+Requires an **operator** key.
 
 **Response (200):**
 
@@ -258,13 +286,14 @@ GET /workers?status=online&type=prep
 }
 ```
 
-### Unregister a Worker
+### Unregister a worker
 
 ```
 DELETE /workers/{worker_id}
 ```
 
 Requires the node key for that worker. This drops one container. It does not decommission the node. Use `DELETE /nodes/{node_id}` for that.
+
 **Response (200):**
 
 ```json
@@ -278,7 +307,7 @@ Requires the node key for that worker. This drops one container. It does not dec
 
 Node lifecycle, including install and removal order, is in [Commissioning](../architecture/commissioning.md).
 
-### Invite a Node
+### Invite a node
 
 ```
 POST /nodes
@@ -315,7 +344,7 @@ Operator key. Creates a row in `pending` and returns the node API key once.
 
 A second invite for a `decommissioned` id mints a new key and returns the row to `pending`. An id in any other state returns 409.
 
-### Register a Node
+### Register a node
 
 ```
 POST /nodes/{node_id}/register
@@ -354,7 +383,7 @@ Node key. Supervisor calls this on startup.
 
 `effective_queues` is the overlap of `allowed_queues` and what the hardware report can run. No GPU drops `convert`. The coordinator replaces `working_hours` with the body of this call so the supervisor config is what gets stored. Register is idempotent while the node is `pending`, `commissioned`, `offline`, or `draining`. A second register refreshes hardware and does not return 409 because a heartbeat arrived recently. `draining` stays `draining`. The other three become `commissioned`. `decommissioned` returns 401 because the key is gone.
 
-### Node Heartbeat
+### Node heartbeat
 
 ```
 POST /nodes/{node_id}/heartbeat
@@ -377,7 +406,7 @@ Node key. Every 30 seconds. No request body.
 
 A missed heartbeat for 120 seconds moves `commissioned` to `offline`. The next successful heartbeat moves `offline` back to `commissioned`. `draining` and `decommissioned` do not change because of a heartbeat.
 
-### Get a Node
+### Get a node
 
 ```
 GET /nodes/{node_id}
@@ -415,7 +444,7 @@ Operator key.
 }
 ```
 
-### List Nodes
+### List nodes
 
 ```
 GET /nodes?state=commissioned
@@ -423,7 +452,7 @@ GET /nodes?state=commissioned
 
 Operator key. Same fields as get, without requiring `last_probe`. `state` is optional.
 
-### Probe a Node
+### Probe a node
 
 ```
 POST /nodes/{node_id}/probe
@@ -452,7 +481,7 @@ Operator key. The node must be `commissioned`.
 
 The supervisor learns about the probe from its next heartbeat. The probe container registers a worker, heartbeats `probe_ok`, and exits. It does not claim a job. A pending probe older than 90 seconds becomes `expired` on the next heartbeat, and the command returns to `run` or `drain`.
 
-### Report a Failed Probe
+### Report a failed probe
 
 ```
 POST /nodes/{node_id}/probes/{probe_id}
@@ -478,7 +507,7 @@ Node key.
 }
 ```
 
-### Patch a Node
+### Patch a node
 
 ```
 PATCH /nodes/{node_id}
@@ -486,7 +515,7 @@ PATCH /nodes/{node_id}
 
 Operator key. Changes `display_name`, `allowed_queues`, or `working_hours`. `effective_queues` is recomputed from the last hardware report. Omitted fields stay as they are.
 
-### Rotate a Node Key
+### Rotate a node key
 
 ```
 POST /nodes/{node_id}/rotate-key
@@ -504,7 +533,7 @@ Operator key. No request body.
 }
 ```
 
-### Drain a Node
+### Drain a node
 
 ```
 POST /nodes/{node_id}/drain
@@ -524,7 +553,7 @@ Operator key. Sets state to `draining`. Heartbeats then return `command: drain`.
 
 `grace_deadline` is 60 minutes after the call. After that the supervisor may `SIGKILL` containers that are still running.
 
-### Decommission a Node
+### Decommission a node
 
 ```
 DELETE /nodes/{node_id}
@@ -542,13 +571,15 @@ Operator key. Allowed from `pending`, `draining`, or `offline`. `pending` has no
 }
 ```
 
-## Progress Reporting
+## Progress reporting
 
-### Report Job Progress
+### Report job progress
 
 ```
 POST /jobs/{job_id}/progress
 ```
+
+Requires a **node** key. Only valid when the job is `in_progress` (prep) or `converting` (convert).
 
 **Request:**
 
@@ -570,9 +601,71 @@ POST /jobs/{job_id}/progress
 }
 ```
 
+### Complete a job
+
+```
+POST /jobs/{job_id}/complete
+```
+
+Requires a **node** key (or operator). Prep jobs send `package_url` and page counts. Convert jobs send `output_url`.
+
+**Prep request:**
+
+```json
+{
+  "package_url": "file:///var/lib/audiobook/packages/{job_id}/",
+  "total_pages": 342,
+  "kept_pages": 318,
+  "skipped_pages": 24
+}
+```
+
+**Convert request:**
+
+```json
+{
+  "output_url": "file:///var/lib/audiobook/audio/{job_id}/"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "job_id": "uuid",
+  "status": "prep_complete"
+}
+```
+
+### Fail a job
+
+```
+POST /jobs/{job_id}/fail
+```
+
+Requires a **node** key (or operator). The coordinator retries up to `job.max_retries` (default 3) by requeueing. After max retries, the job is `failed` (prep) or `convert_failed` (convert).
+
+**Request:**
+
+```json
+{
+  "error": "PDF parsing failed: invalid file"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "job_id": "uuid",
+  "status": "submitted",
+  "retry_count": 1
+}
+```
+
 ## Health
 
-### Health Check
+### Health check
 
 ```
 GET /health
@@ -598,7 +691,7 @@ No API key. Process supervisors use this. It reports reachability of dependencie
 }
 ```
 
-## Error Responses
+## Error responses
 
 All errors return a consistent format:
 
@@ -612,7 +705,7 @@ All errors return a consistent format:
 }
 ```
 
-### Error Codes
+### Error codes
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
