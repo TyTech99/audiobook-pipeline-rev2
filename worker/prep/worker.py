@@ -283,7 +283,16 @@ class PrepWorker:
                 continue
             jobs_processed += 1
             try:
-                self.heartbeat(job["job_id"])
+                job_id = job["job_id"]
+                # Fetch full job details from coordinator (queue only has job_id + type)
+                response = self.http.get(
+                    f"{self.coordinator_url}/jobs/{job_id}",
+                    headers=self._headers(),
+                    timeout=10,
+                )
+                response.raise_for_status()
+                job = response.json()
+                self.heartbeat(job_id)
                 self.process_job(job)
             except Exception as exc:
                 try:
