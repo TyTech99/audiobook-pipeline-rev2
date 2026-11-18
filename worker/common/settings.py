@@ -33,14 +33,26 @@ def flatten_worker_settings(raw: dict) -> dict:
     if not node_id:
         raise SystemExit("worker config has no node_id (worker.node_id or NODE_ID env)")
 
-    redis_host = str(redis_cfg.get("host") or "127.0.0.1")
-    redis_port = int(redis_cfg.get("port") or 6379)
-    redis_password = str(redis_cfg.get("password") or "")
-    redis_db = int(redis_cfg.get("db") or 0)
+    redis_host = str(
+        os.environ.get("REDIS_HOST", "").strip()
+        or redis_cfg.get("host")
+        or "127.0.0.1"
+    )
+    redis_port = int(os.environ.get("REDIS_PORT", "").strip() or redis_cfg.get("port") or 6379)
+    redis_password = str(
+        os.environ.get("REDIS_PASSWORD", "").strip()
+        or redis_cfg.get("password")
+        or ""
+    )
+    redis_db = int(os.environ.get("REDIS_DB", "").strip() or redis_cfg.get("db") or 0)
 
-    coordinator_url = str(coordinator.get("url") or "").rstrip("/")
+    coordinator_url = str(
+        os.environ.get("COORDINATOR_URL", "").strip()
+        or coordinator.get("url")
+        or ""
+    ).rstrip("/")
     if not coordinator_url:
-        raise SystemExit("worker config has no coordinator.url")
+        raise SystemExit("worker config has no coordinator.url (or COORDINATOR_URL env)")
     api_key = str(coordinator.get("api_key") or "").strip()
     if not api_key:
         raise SystemExit("worker config has no coordinator.api_key")
