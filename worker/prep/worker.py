@@ -240,7 +240,19 @@ class PrepWorker:
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
             author_hint = metadata.get("author") or job.get("metadata", {}).get("author") or ""
-            self.report_progress(job_id, {"stage": "normalizing", "percent": 42})
+            # Classify and detect structure on the RAW page text: the
+            # detectors read line structure (a standalone 'INTRODUCTION'
+            # heading, stacked title-page words, contents entry lines).
+            # normalize_pages joins lines into paragraphs, which would
+            # destroy those signals before detection ever runs.
+            self.report_progress(job_id, {"stage": "classifying", "percent": 42})
+            for page in doc["pages"]:
+                action, reason = classify_page(page)
+                page["action"] = action
+                page["reason"] = reason
+            raw_pages = doc["pages"]
+
+            self.report_progress(job_id, {"stage": "normalizing", "percent": 45})
             # Normalize text: strip headers/footers, repair hyphenations, reconstruct paragraphs
             from worker.prep.cleanup import normalize_pages
             from worker.prep.normalization_settings import NormalizationSettings
@@ -253,7 +265,7 @@ class PrepWorker:
                 logger.info("Using per-job normalization overrides: %s", job_norm_overrides)
 
             doc["pages"], norm_notes = normalize_pages(
-                doc["pages"], title=title_hint, author=author_hint, settings=norm_settings
+                raw_pages, title=title_hint, author=author_hint, settings=norm_settings
             )
             if norm_notes:
                 logger.info("Normalization: %d changes (%d headers, %d page numbers, %d hyphens)",
@@ -261,11 +273,6 @@ class PrepWorker:
                             sum(1 for n in norm_notes if n[0] == "header-removed"),
                             sum(1 for n in norm_notes if n[0] == "page-number-removed"),
                             sum(1 for n in norm_notes if n[0] in ("hyphen-joined", "hyphen-unresolved")))
-            self.report_progress(job_id, {"stage": "classifying", "percent": 45})
-            for page in doc["pages"]:
-                action, reason = classify_page(page)
-                page["action"] = action
-                page["reason"] = reason
         else:
             logger.info("Parsing EPUB...")
             doc = parse_epub(data)
@@ -275,10 +282,12 @@ class PrepWorker:
                 action, reason = classify_epub_item(page)
                 page["action"] = action
                 page["reason"] = reason
+            raw_pages = doc["pages"]
 
         logger.info("Detecting chapters...")
         self.check_cancelled(job_id)
-        chapters = detect_chapters(doc["pages"])
+        # On raw text: the normalized pages carry paragraphs, not lines.
+        chapters = detect_chapters(raw_pages)
         logger.info("Detected %d chapters", len(chapters))
         self.report_progress(job_id, {"stage": "chapters", "percent": 50, "total_chapters": len(chapters)})
         metadata = doc["metadata"]
@@ -307,7 +316,10 @@ class PrepWorker:
 
         logger.info("Building page ledger...")
         self.report_progress(job_id, {"stage": "ledger", "percent": 65})
-        ledger = build_page_ledger(input_format, input_url, doc["pages"], chapters)
+        # The ledger is built from raw pages: frontmatter classification reads
+        # line structure (title-page words, contents entries), and the
+        # normalized pages only carry paragraphs.
+        ledger = build_page_ledger(input_format, input_url, raw_pages, chapters)
         ledger_errors = validate_page_ledger(ledger, doc["total_pages"])
         if ledger_errors:
             raise ValueError(f"Page ledger validation failed: {ledger_errors}")
