@@ -2,17 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Protocol
 
 from worker.common.llm_client import LLMClient, LLMError, LLMSettings, llm_settings_from_mapping
-from worker.prep.llm.prompts import SYSTEM_PROMPT, build_user_prompt
+from worker.prep.llm.prompts import (
+    CHAPTER_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_chapter_prompt,
+    build_user_prompt,
+)
 
+logger = logging.getLogger(__name__)
 
 EMPTY_ANALYSIS: dict[str, Any] = {
     "subject_summary": "",
     "author_tone": "",
     "narration_style_recommendations": [],
     "suggested_voice_recipes": [],
+    "chapters": [],
 }
 
 
@@ -25,6 +33,18 @@ class Analyzer(Protocol):
         language: str,
         pages: list[dict],
     ) -> dict[str, Any]:
+        ...
+
+    def analyze_chapters(
+        self,
+        *,
+        title: str,
+        author: str,
+        language: str,
+        pages: list[dict],
+        chapters: list[dict],
+        max_chapters: int = 12,
+    ) -> list[dict[str, Any]]:
         ...
 
 
@@ -67,6 +87,19 @@ def _normalize_recipe(item: Any) -> dict[str, str] | None:
     if not recipe or not style or not reason:
         return None
     return {"recipe": recipe, "style": style, "reason": reason}
+
+
+def _normalize_chapter(chapter: dict, raw: dict[str, Any]) -> dict[str, Any]:
+    """Normalize one chapter-analysis result for llm-analysis.json."""
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "section": str(chapter.get("section") or ""),
+        "title": str(chapter.get("title") or ""),
+        "start_page": chapter.get("start_page"),
+        "summary": str(raw.get("summary") or "").strip(),
+        "tone_note": str(raw.get("tone_note") or "").strip(),
+    }
 
 
 def normalize_analysis(raw: dict[str, Any]) -> dict[str, Any]:
@@ -133,6 +166,52 @@ class LLMAnalyzer:
             ),
         )
         return normalize_analysis(raw)
+
+    def analyze_chapters(
+        self,
+        *,
+        title: str,
+        author: str,
+        language: str,
+        pages: list[dict],
+        chapters: list[dict],
+        max_chapters: int = 12,
+    ) -> list[dict[str, Any]]:
+        """Per-chapter summaries + narrator tone notes (Phase 5 subset of #15).
+
+        Optional enrichment: never raises — an unconfigured client returns
+        [], and a failed call skips that chapter rather than failing the
+        job. Sections with almost no text (title pages, dedications) are
+        skipped; bounded to max_chapters LLM calls.
+        """
+        if not self.client.settings.configured:
+            return []
+        by_page = {p["page"]: p for p in pages}
+        results: list[dict[str, Any]] = []
+        for ch in chapters[:max_chapters]:
+            chapter_pages = [by_page[n] for n in ch.get("pages", []) if n in by_page]
+            sample = _sample_text(chapter_pages, max_chars=8000)
+            # Frontmatter stubs (title page, dedication, epigraph) have no
+            # narrative content worth a summary call.
+            if len(sample.strip()) < 500:
+                continue
+            try:
+                raw = self.client.chat_json(
+                    system=CHAPTER_SYSTEM_PROMPT,
+                    user=build_chapter_prompt(
+                        book_title=title,
+                        chapter_title=ch.get("title") or ch.get("section") or "",
+                        language=language,
+                        sample_text=sample,
+                    ),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Chapter analysis failed for %s: %s", ch.get("section"), e,
+                )
+                continue
+            results.append(_normalize_chapter(ch, raw))
+        return results
 
 
 def analyzer_from_settings(settings: dict, http=None) -> LLMAnalyzer:
