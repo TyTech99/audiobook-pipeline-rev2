@@ -810,3 +810,41 @@ def test_chapter_title_stops_at_epigraph_quote():
     assert len(heads) == 2
     assert heads[0]["title"] == "Famine Over Europe"
     assert heads[1]["title"] == "The Pound of Flesh"
+
+
+def test_ocr_artifact_and_indent_helpers():
+    # Issue #46: pipe glyphs are page scratches, not prose; paragraph
+    # indentation survives OCR as leading spaces.
+    from worker.prep.ocr import _drop_artifact_words, _indent_spaces, _page_margin_and_char_px
+
+    words = [
+        {"text": "complete", "left": 100, "width": 200},
+        {"text": "|", "left": 400, "width": 8},
+        {"text": "confidence", "left": 500, "width": 240},
+    ]
+    kept = _drop_artifact_words(words)
+    assert [w["text"] for w in kept] == ["complete", "confidence"]
+
+    # p.22 numbers: 'But a terrible shock' first word at left=470,
+    # page margin ~357, char width ~23px -> 4 leading spaces.
+    assert _indent_spaces(470, 357, 23.0) == 4
+    # Letter-bearing jitter (T vs I) rounds to nothing.
+    assert _indent_spaces(373, 357, 23.0) == 0
+    # Centered display lines are capped.
+    assert _indent_spaces(2000, 357, 23.0) == 12
+    # Left of the margin and missing margin are safe.
+    assert _indent_spaces(300, 357, 23.0) == 0
+    assert _indent_spaces(470, None, 23.0) == 0
+
+    lines = [
+        {"words": [{"left": 354, "text": "a", "width": 46}]},
+        {"words": [{"left": 355, "text": "bb", "width": 46}, {"left": 600, "text": "ccc", "width": 69}]},
+        {"words": [{"left": 470, "text": "dd", "width": 46}]},
+        {"words": [{"left": 357, "text": "eee", "width": 69}]},
+    ]
+    margin, char_px = _page_margin_and_char_px(lines)
+    assert margin == 357          # median of first-word lefts [354,355,357,470]
+    assert char_px == 23.0        # median of word width / char count
+
+    # Too few lines: no margin estimate, no indentation applied.
+    assert _page_margin_and_char_px(lines[:2]) == (None, 0.0)
