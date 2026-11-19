@@ -40,6 +40,9 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
 
     if ocr_settings is None:
         ocr_settings = OcrQualitySettings()
+    # The gate's dictionary language must follow the job's actual OCR
+    # language, not just the static config default (#48).
+    ocr_settings.language = language
 
     doc = fitz.open(stream=data, filetype="pdf")
     pages = []

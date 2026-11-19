@@ -138,6 +138,58 @@ class LLMClient:
         self.settings = settings
         self.http = http or httpx.Client(timeout=settings.timeout_seconds)
 
+    def chat_text(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float = 0.2,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Plain-text chat completion (no JSON response format).
+
+        Used by the OCR cleanup path, which needs raw text back, not a
+        JSON object (chat_json enforces response_format json_object).
+        """
+        if not self.settings.configured:
+            raise LLMError("LLM_BASE_URL is not set")
+        if not self.settings.model:
+            raise LLMError("LLM_MODEL is not set")
+
+        headers = {"Content-Type": "application/json"}
+        if self.settings.api_key:
+            headers["Authorization"] = f"Bearer {self.settings.api_key}"
+
+        body: dict[str, Any] = {
+            "model": self.settings.model,
+            "temperature": temperature,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        }
+        if max_tokens:
+            body["max_tokens"] = max_tokens
+        try:
+            response = self.http.post(self.settings.chat_url(), headers=headers, json=body)
+        except httpx.HTTPError as exc:
+            raise LLMError(f"LLM request failed: {exc}") from exc
+        if response.status_code >= 400:
+            raise LLMError(f"LLM HTTP {response.status_code}: {response.text[:500]}")
+        try:
+            payload = response.json()
+        except json.JSONDecodeError as exc:
+            raise LLMError("LLM response was not JSON") from exc
+        try:
+            content = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError("LLM response missing choices[0].message.content") from exc
+        if isinstance(content, list):
+            content = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+            )
+        return str(content)
+
     def chat_json(
         self,
         *,

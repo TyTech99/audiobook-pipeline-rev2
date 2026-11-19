@@ -286,6 +286,56 @@ def test_llm_required_without_endpoint_raises():
         assert "base_url" in str(exc)
 
 
+def test_llm_client_chat_text_plain_completion():
+    # Issue #48: the OCR cleanup path needs a plain-text completion.
+    # chat_json forces response_format json_object; chat_text must not,
+    # and must return the raw content string.
+    from worker.common.llm_client import LLMClient, LLMSettings
+
+    captured = {}
+
+    class FakeHttp:
+        def post(self, url, headers=None, json=None):
+            captured["body"] = json
+            return type("R", (), {
+                "status_code": 200,
+                "json": lambda self=None: {"choices": [{"message": {"content": "cleaned text"}}]},
+            })()
+
+    client = LLMClient(LLMSettings(base_url="http://llm/v1", api_key="k", model="m"), http=FakeHttp())
+    out = client.chat_text(system="sys", user="usr", temperature=0.1, max_tokens=99)
+    assert out == "cleaned text"
+    assert captured["body"]["messages"] == [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "usr"},
+    ]
+    assert captured["body"]["max_tokens"] == 99
+    assert "response_format" not in captured["body"]  # plain text, not JSON mode
+
+
+def test_cleanup_page_with_llm_preserves_indent_and_uses_chat_text():
+    # Issue #48: the cleanup call must go through chat_text (the old code
+    # awaited a nonexistent .chat and failed silently on every page), and
+    # the prompt must demand preservation of leading spaces.
+    import asyncio
+    from worker.prep.ocr_cleanup import OcrQualitySettings, cleanup_page_with_llm
+
+    captured = {}
+
+    class FakeClient:
+        def chat_text(self, *, system, user, temperature, max_tokens):
+            captured["user"] = user
+            return "   But a terrible shock was administered\nrest of the page text here."
+
+    raw = "   But a terrible shock was administered\nrest of the page text here."
+    settings = OcrQualitySettings()
+    quality = {"reasons": ["mid_line_lower_restart (1 > 0)"], "confidence": 94.9, "dict_share": 0.99}
+    out = asyncio.run(cleanup_page_with_llm(FakeClient(), 22, raw, quality, settings))
+    assert out.startswith("   But a terrible shock")  # leading spaces survive
+    assert "leading spaces" in captured["user"]
+    assert "preserve each line" in captured["user"].lower()
+
+
 def test_prep_worker_uses_analyzer(tmp_path):
     from worker.prep.worker import PrepWorker
 
@@ -848,3 +898,59 @@ def test_ocr_artifact_and_indent_helpers():
 
     # Too few lines: no margin estimate, no indentation applied.
     assert _page_margin_and_char_px(lines[:2]) == (None, 0.0)
+
+
+def test_ocr_quality_gate_structural_triggers(tmp_path, monkeypatch):
+    # Issue #48: the gate must flag pages carrying junk that the old stub
+    # dictionary check (always 1.0) and the mean confidence could not see.
+    import os
+
+    from worker.prep.ocr_cleanup import OcrQualitySettings, judge_ocr_quality, _dictionary_share
+
+    # Fixture dictionary so the tests do not depend on host word lists.
+    dict_dir = tmp_path / "dict"
+    dict_dir.mkdir()
+    (dict_dir / "american-english-large").write_text(
+        "book\nwar\nbritish\npeople\nprepared\nfight\nthe\nof\nand\nwas\npublished\nin\nby\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dict_dir))
+
+    settings = OcrQualitySettings(min_confidence=0.0)
+
+    # Clean page: passes.
+    clean = {"text": "the book of war and the people was prepared", "confidence": 96.0}
+    result = judge_ocr_quality(clean, settings)
+    assert result["passed"], result["reasons"]
+    assert result["dict_share"] == 1.0
+
+    # Real dictionary measure: junk words lower the share (the old stub
+    # returned 1.0 for anything alphabetic).
+    assert _dictionary_share("the book of gobbleyx") == 0.75
+    junky = {"text": "the book of gobbleyx and frumious bandersnatch", "confidence": 96.0}
+    result = judge_ocr_quality(junky, settings)
+    assert not result["passed"]
+    assert any(r.startswith("low_dict_share") for r in result["reasons"])
+
+    # Scan-edge clipped line: lowercase fragment after terminal punctuation
+    # mid-line ('fight. ry did not' — Unfinished Victory p.22).
+    clipped = {"text": "the British people were prepared to fight. ry did not", "confidence": 96.0}
+    result = judge_ocr_quality(clipped, settings)
+    assert not result["passed"]
+    assert any(r.startswith("mid_line_lower_restart") for r in result["reasons"]), result["reasons"]
+
+    # Digit+letter junk token ('1x' — misread roman-numeral footer).
+    mixed = {"text": "the book of war 1x and the people", "confidence": 96.0}
+    result = judge_ocr_quality(mixed, settings)
+    assert any(r.startswith("digit_letter_token") for r in result["reasons"]), result["reasons"]
+
+    # Real numbers ('1940') carry no letters and do not trip the trigger.
+    dated = {"text": "the book of war published in 1940 by the people", "confidence": 96.0}
+    result = judge_ocr_quality(dated, settings)
+    assert result["passed"], result["reasons"]
+
+    # Missing word list: the share check disables itself, structural
+    # triggers still work.
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(tmp_path / "nowhere"))
+    clipped2 = {"text": "the British people were prepared to fight. ry did not", "confidence": 96.0}
+    result = judge_ocr_quality(clipped2, settings)
+    assert any(r.startswith("mid_line_lower_restart") for r in result["reasons"]), result["reasons"]
