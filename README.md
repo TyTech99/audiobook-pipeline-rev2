@@ -301,6 +301,8 @@ Output of the prep stage. A directory containing:
 - `page-ledger.json`: page-by-page accounting of the source document
 - `metadata.json`: extracted and enriched metadata
 - `llm-analysis.json`: subject summary, tone analysis, style recommendations
+- `cleanup-log.json`: every LLM cleanup change kept or reverted, with its justification (#65)
+- `fidelity-report.json`: per-book cleanup fidelity — kept by class, reverted, low-confidence sites, 0 unattributed (#65)
 - `manifest.json`: package manifest with validation status
 - `cover.jpg`: cover art
 
