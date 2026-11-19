@@ -6,6 +6,7 @@ not hardcoded.
 
 from __future__ import annotations
 
+import bisect
 import difflib
 import logging
 import re
@@ -366,6 +367,101 @@ def declare_page_words(page_number: int, text: str, language: str = "eng") -> li
         excerpt = ("…" + text[max(0, pos - 40):pos + 50] + "…") if pos >= 0 else token
         sites.append({"page": page_number, "word": token, "count": count, "excerpt": excerpt})
     return sites
+
+
+# Minimum length for a fragment-completion candidate (#70): two-letter
+# fragments ('im', 'ery') are overwhelmingly ambiguous noise.
+_MIN_FRAGMENT_LEN = 3
+
+
+def repair_fragment_completions(pages: list[dict], language: str = "eng") -> list[dict]:
+    """Deterministic tail-completion repairs for declared fragment words (#70).
+
+    Consumes the #68 declarations as repair input. An OCR page's
+    non-dictionary word is repaired in place iff:
+
+      1. it is a strict prefix of EXACTLY ONE dictionary word — ambiguity
+         means no repair, ever ('scon' stays declared next to six
+         candidates while the print says 'soon');
+      2. the completion is witnessed in the book's own parsed text (the
+         author demonstrably uses it — 'almos' completes to 'almost',
+         which occurs nine times in the same book);
+      3. the fragment is at least _MIN_FRAGMENT_LEN letters.
+
+    Tail-extension only — the clipped-word damage shape. Substitutions
+    (slaid -> laid) are not completions and stay unattributable forever.
+    Only OCR pages are touched (text-layer pages carry the book's own
+    typeset text — a non-dictionary word there is the author's, not
+    damage). Text-layer and OCR pages both contribute to the witness
+    corpus.
+
+    Returns per-page records for the package fidelity log; each repaired
+    page's "text" is updated in place and its "fragment_repairs" set.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("fragment completion unavailable: %s", e)
+        return []
+    sorted_words = sorted(dictionary)
+    corpus_words = set()
+    for p in pages:
+        corpus_words.update(dicts.counted(p.get("text", "")))
+
+    def _unique_completion(token: str) -> str | None:
+        found: list[str] = []
+        i = bisect.bisect_left(sorted_words, token)
+        while i < len(sorted_words) and sorted_words[i].startswith(token):
+            word = sorted_words[i]
+            if len(word) > len(token):
+                found.append(word)
+                if len(found) > 1:
+                    return None
+            i += 1
+        return found[0] if len(found) == 1 else None
+
+    records: list[dict] = []
+    for p in pages:
+        # Text-layer pages are the book's own typeset text — never repaired.
+        if not p.get("ocr_quality"):
+            continue
+        text = p.get("text", "")
+        if not text:
+            continue
+        counts: dict[str, int] = {}
+        for token in dicts.counted(text):
+            if len(token) < _MIN_FRAGMENT_LEN or token in dictionary or token.split("'")[0] in dictionary:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+        repairs: dict[str, str] = {}
+        for token in counts:
+            completion = _unique_completion(token)
+            if completion and completion in corpus_words:
+                repairs[token] = completion
+        if not repairs:
+            p["fragment_repairs"] = None
+            continue
+        for token, completion in repairs.items():
+            pattern = re.compile(r"\b" + re.escape(token) + r"\b", re.IGNORECASE)
+
+            def _sub(match, completion=completion):
+                found = match.group(0)
+                return completion.capitalize() if found[:1].isupper() else completion
+
+            text = pattern.sub(_sub, text)
+            records.append(
+                {
+                    "page": p.get("page"),
+                    "word": token,
+                    "completion": completion,
+                    "count": counts.get(token, 0),
+                }
+            )
+        p["text"] = text
+        p["fragment_repairs"] = [r for r in records if r.get("page") == p.get("page")]
+    return records
 
 
 # How each gate reason is explained to the cleanup model. A generic

@@ -98,7 +98,6 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
         ocr_quality = None
         ocr_result = None
         cleanup_record = None
-        declared_words = None
 
         # If no text layer and OCR is enabled, try OCR
         if not text and use_ocr:
@@ -155,9 +154,6 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
                     ocr_quality["dict_share"],
                     " (LLM cleaned)" if llm_cleanup_count > 0 else "",
                 )
-                # Word-level damage declaration (#68): non-dictionary words
-                # in the SHIPPED text, on every OCR page — the honest U.
-                declared_words = ocr_cleanup.declare_page_words(page_num + 1, text, language)
 
         page_data = {
             "page": page_num + 1,
@@ -166,7 +162,6 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
             "ocr_quality": ocr_quality,
             "cleanup": cleanup_record,
             "low_conf_words": (ocr_result or {}).get("low_conf_words", 0),
-            "declared_words": declared_words,
         }
         pages.append(page_data)
 
@@ -182,6 +177,19 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
 
     if ocr_count > 0:
         logger.info("OCR used for %d of %d pages (%d LLM cleaned)", ocr_count, len(pages), llm_cleanup_count)
+
+    # Deterministic fragment-completion repairs (#70): consume the
+    # non-dictionary declarations as repair input, now that every page is
+    # parsed and the full book corpus is available for the witness check.
+    from worker.prep import ocr_cleanup
+
+    fragment_repairs = ocr_cleanup.repair_fragment_completions(pages, language)
+    if fragment_repairs:
+        logger.info(
+            "Fragment completions: %d repairs over %d pages",
+            len(fragment_repairs),
+            len({r.get("page") for r in fragment_repairs}),
+        )
 
     return {
         "format": "pdf",

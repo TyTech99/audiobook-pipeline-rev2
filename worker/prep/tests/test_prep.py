@@ -616,6 +616,77 @@ def test_declare_page_words_degrades_gracefully_without_word_list(tmp_path, monk
     assert declare_page_words(8, "any text at all", "eng") == []
 
 
+def test_repair_fragment_completions_unique_witnessed(tmp_path, monkeypatch):
+    # Issue #70: almos -> almost is applied deterministically when the
+    # completion is dictionary-unique and book-witnessed; ambiguous 'scon'
+    # stays; text-layer pages are never touched.
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "the\nof\na\nin\nit\nwar\nfeel\nwho\nsome\nfaced\nby\nsecond\nworld\ngeneration\n"
+        "there\nare\ntwice\nthey\nmight\nhave\nknown\nbetter\nremains\ntext\nlayer\npage\nwith\naside\n"
+        "almost\npeace\nsconce\nscone\nsoon\nslaid\nimp\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    pages = [
+        {
+            "page": 8,
+            "ocr_quality": {"passed": True},
+            "text": "There are some who, faced by a second world war in a generation, almos feel it. Almos twice.",
+        },
+        {"page": 9, "ocr_quality": {"passed": True}, "text": "they might almost have known better. the scon remains."},
+        {"page": 10, "text": "a text layer page with almos aside"},
+    ]
+    records = repair_fragment_completions(pages, "eng")
+    assert records == [
+        {"page": 8, "word": "almos", "completion": "almost", "count": 2},
+    ]
+    assert pages[0]["text"] == (
+        "There are some who, faced by a second world war in a generation, almost feel it. Almost twice."
+    )
+    assert pages[0]["fragment_repairs"] == records
+    # ambiguity means no repair, ever — the print said 'soon'
+    assert "the scon remains." in pages[1]["text"]
+    assert pages[1].get("fragment_repairs") in (None, [])
+    # text-layer pages are the book's own typeset text — never repaired
+    assert "almos" in pages[2]["text"]
+
+
+def test_repair_fragment_completions_requires_book_witness(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text("the\nof\npeace\nworld\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    # 'peac' has a unique dictionary completion 'peace', but the author
+    # never uses 'peace' anywhere in the parsed text — no witness, no repair.
+    pages = [{"page": 1, "ocr_quality": {"passed": True}, "text": "the peac of the world"}]
+    assert repair_fragment_completions(pages, "eng") == []
+    assert "peac" in pages[0]["text"]
+
+
+def test_repair_fragment_completions_min_length_guard(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text("the\nan\nit\nof\nappeared\nimp\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    # 'im' is a unique dictionary completion of... itself? 'im' has a unique
+    # longer completion 'imp', witnessed — but two-letter fragments are
+    # excluded by the minimum-length guard.
+    pages = [
+        {"page": 1, "ocr_quality": {"passed": True}, "text": "the im of it"},
+        {"page": 2, "ocr_quality": {"passed": True}, "text": "an imp appeared"},
+    ]
+    assert repair_fragment_completions(pages, "eng") == []
+    assert "the im of it" == pages[0]["text"]
+
+
 def test_verify_cleanup_reverts_structural_damage():
     # Issue #65: the line sequence is the paragraph witness.
     from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup

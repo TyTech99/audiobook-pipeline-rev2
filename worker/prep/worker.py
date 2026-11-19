@@ -208,6 +208,7 @@ class PrepWorker:
         cleanup_records: list[dict] = []
         declared_sites: list[dict] = []
         ocr_quality_pages: list[dict] = []
+        fragment_repair_records: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -239,23 +240,8 @@ class PrepWorker:
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.check_cancelled(job_id)
-            # Cleanup verify records flow into the package logs (#65);
-            # declared word sites (#68) and per-page quality verdicts too.
+            # Cleanup verify records flow into the package logs (#65).
             cleanup_records = [p["cleanup"] for p in doc["pages"] if p.get("cleanup")]
-            declared_sites = [s for p in doc["pages"] for s in (p.get("declared_words") or [])]
-            ocr_quality_pages = [
-                {
-                    "page": p["page"],
-                    "confidence": (p.get("ocr_quality") or {}).get("confidence"),
-                    "dict_share": (p.get("ocr_quality") or {}).get("dict_share"),
-                    "reasons": (p.get("ocr_quality") or {}).get("reasons", []),
-                    "passed": (p.get("ocr_quality") or {}).get("passed"),
-                    "cleaned": bool(p.get("cleanup")),
-                    "declared_words": len(p.get("declared_words") or []),
-                }
-                for p in doc["pages"]
-                if p.get("ocr_quality")
-            ]
             # Extract metadata early (needed for normalization header detection)
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
@@ -293,6 +279,32 @@ class PrepWorker:
                             sum(1 for n in norm_notes if n[0] == "header-removed"),
                             sum(1 for n in norm_notes if n[0] == "page-number-removed"),
                             sum(1 for n in norm_notes if n[0] in ("hyphen-joined", "hyphen-unresolved")))
+            # Word-level declaration on the SHIPPED text (#68) and the
+            # fragment-completion records (#70) flow into the package logs
+            # from here — post-normalize, so hyphen fragments are already
+            # joined and the declared count reflects what narration reads.
+            from worker.prep.ocr_cleanup import declare_page_words
+
+            job_language = job.get("metadata", {}).get("language") or "eng"
+            declared_by_page: dict = {}
+            for p in doc["pages"]:
+                declared_by_page[p["page"]] = declare_page_words(p["page"], p.get("text", ""), job_language)
+            declared_sites = [s for sites in declared_by_page.values() for s in sites]
+            fragment_repair_records = [r for p in raw_pages for r in (p.get("fragment_repairs") or [])]
+            ocr_quality_pages = [
+                {
+                    "page": p["page"],
+                    "confidence": (p.get("ocr_quality") or {}).get("confidence"),
+                    "dict_share": (p.get("ocr_quality") or {}).get("dict_share"),
+                    "reasons": (p.get("ocr_quality") or {}).get("reasons", []),
+                    "passed": (p.get("ocr_quality") or {}).get("passed"),
+                    "cleaned": bool(p.get("cleanup")),
+                    "fragment_repairs": len(p.get("fragment_repairs") or []),
+                    "declared_words": len(declared_by_page.get(p["page"], [])),
+                }
+                for p in raw_pages
+                if p.get("ocr_quality")
+            ]
         else:
             logger.info("Parsing EPUB...")
             doc = parse_epub(data)
@@ -415,16 +427,21 @@ class PrepWorker:
             # rare words, both counted, never silently shipped.
             "declared_word_sites": len(declared_sites),
             "declared_words_sample": declared_sites[:20],
+            # Fragment completions (#70): deterministic tail-extension
+            # repairs — unique dictionary completion, book-witnessed.
+            "fragment_completions_applied": len(fragment_repair_records),
+            "fragment_completions": fragment_repair_records[:50],
             "unattributed_changes": 0,
         }
         logger.info(
             "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d "
-            "declared_words=%d unattributed=0",
+            "declared_words=%d fragment_completions=%d unattributed=0",
             fidelity["changes_kept"],
             fidelity["changes_reverted"],
             fidelity["structural_reverts"],
             fidelity["low_conf_word_sites"],
             fidelity["declared_word_sites"],
+            fidelity["fragment_completions_applied"],
         )
 
         package = {
@@ -447,6 +464,7 @@ class PrepWorker:
                         "changes_reverted": fidelity["changes_reverted"],
                         "low_conf_word_sites": fidelity["low_conf_word_sites"],
                         "declared_word_sites": fidelity["declared_word_sites"],
+                        "fragment_completions_applied": fidelity["fragment_completions_applied"],
                         "unattributed_changes": fidelity["unattributed_changes"],
                     },
                 },
