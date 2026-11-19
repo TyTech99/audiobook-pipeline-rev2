@@ -75,48 +75,26 @@ def ocr_page(page, dpi: int = 300, language: str = "eng") -> dict:
             }
 
         # Group words by (block, par, line) — Tesseract's own line detection.
-        # Within each line, sort by word_num (Tesseract's reading order).
-        # Lines are ordered by their top position (first word's top).
+        # Verified against Unfinished Victory p.5: Tesseract correctly puts a
+        # page heading in its own block/line, separate from the body text.
+        # Do NOT regroup by y-coordinates: word bounding-box tops vary by
+        # more than a line-jitter threshold (ascenders/descenders), which
+        # scrambles reading order.
         from collections import OrderedDict
 
-        # Use y-coordinate-based line detection instead of Tesseract's line grouping.
-        # Tesseract sometimes merges headings with body text when they're close together.
-        # We detect lines by clustering words with similar y-coordinates.
-        from collections import OrderedDict
+        lines = OrderedDict()
+        for w in words:
+            key = (w["block"], w["par"], w["line"])
+            if key not in lines:
+                lines[key] = {"words": [], "top": w["top"]}
+            lines[key]["words"].append(w)
 
-        # Sort all words by their top position, then left position
-        words_sorted = sorted(words, key=lambda w: (w["top"], w["left"]))
+        # Sort words within each line by word_num (reading order)
+        for line in lines.values():
+            line["words"].sort(key=lambda w: w["word"])
 
-        if words_sorted:
-            # Use a threshold of 5 pixels at 300 DPI (approximately 0.4mm)
-            # Words with top positions within this threshold are on the same line
-            line_threshold = 5  # pixels at 300 DPI
-
-            y_lines = []
-            current_line = None
-
-            for w in words_sorted:
-                if current_line is None or abs(w["top"] - current_line["top"]) <= line_threshold:
-                    if current_line is None:
-                        current_line = {"words": [], "top": w["top"]}
-                        y_lines.append(current_line)
-                    current_line["words"].append(w)
-                    # Update current_line top to the average of words in this line
-                    tops = [ww["top"] for ww in current_line["words"]]
-                    current_line["top"] = sum(tops) / len(tops)
-                else:
-                    current_line = {"words": [], "top": w["top"]}
-                    y_lines.append(current_line)
-                    current_line["words"].append(w)
-
-            # Sort words within each line by left position (reading order)
-            for line in y_lines:
-                line["words"].sort(key=lambda w: w["left"])
-
-            # Sort lines by vertical position
-            sorted_lines = sorted(y_lines, key=lambda l: l["top"])
-        else:
-            sorted_lines = []
+        # Sort lines by vertical position (top of first word)
+        sorted_lines = sorted(lines.values(), key=lambda l: l["top"])
 
         # Build text: join words within a line with spaces, lines with newlines
         text_lines = []

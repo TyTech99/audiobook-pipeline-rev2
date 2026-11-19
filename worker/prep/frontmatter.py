@@ -120,7 +120,7 @@ def _line_stats(text: str) -> dict:
     }
 
 
-def _has_page_number(text: str) -> bool:
+def _has_page_number(text: str, ignore_years: bool = False) -> bool:
     """Check if a page has a visible page number (in header or footer)."""
     lines = [l.strip() for l in text.split("\n") if l.strip()]
     if not lines:
@@ -128,6 +128,10 @@ def _has_page_number(text: str) -> bool:
     # Check first and last lines for standalone numbers
     for line in [lines[0], lines[-1]]:
         if re.fullmatch(r"\d{1,4}", line):
+            # A 4-digit number in 1800-2100 on a title page is a publication
+            # year ("1940"), not a page number.
+            if ignore_years and re.fullmatch(r"(1[89]\d{2}|20\d{2}|2100)", line):
+                continue
             return True
         # Roman numerals (common in frontmatter)
         if re.fullmatch(r"[ivxlcdm]+", line, re.IGNORECASE):
@@ -145,7 +149,8 @@ def _is_title_page(page_num: int, text: str, stats: dict) -> bool:
     if stats["total_chars"] > TITLE_PAGE_MAX_CHARS:
         return False
     # Title pages are usually centered and don't have page numbers
-    if _has_page_number(text):
+    # (a publication year like "1940" on the last line is not a page number)
+    if _has_page_number(text, ignore_years=True):
         return False
     # Title pages don't contain backmatter keywords
     for pattern in BACKMATTER_RE.values():
@@ -153,6 +158,23 @@ def _is_title_page(page_num: int, text: str, stats: dict) -> bool:
             return False
     # Title pages typically have short, centered lines
     return stats["centering_ratio"] > 0.3
+
+
+# A contents-entry line: 'CHAPTER 4', 'IV.', a lone page number, or
+# 'Some Title' followed by a lone number line ('FAMINE OVER EUROPE' / '28').
+TOC_ENTRY_RE = re.compile(r"^\s*(CHAPTER\s+[A-Z0-9]+|[IVXLC]+\.)\s*$", re.IGNORECASE)
+TOC_NUMBER_RE = re.compile(r"^\s*[0-9OIl]{1,4}\s*$")
+
+
+def _toc_entry_lines(lines: list[str]) -> int:
+    """Count lines that look like contents entries."""
+    count = 0
+    for i, ln in enumerate(lines):
+        if TOC_ENTRY_RE.fullmatch(ln):
+            count += 1
+        elif TOC_NUMBER_RE.fullmatch(ln) and i > 0 and lines[i - 1].strip():
+            count += 1          # a lone page number under its entry title
+    return count
 
 
 def _is_copyright_page(page_num: int, text: str) -> bool:
@@ -171,9 +193,12 @@ def _is_toc_page(page_num: int, text: str, stats: dict) -> bool:
     has_heading = any(TOC_HEADING_RE.match(l) for l in lines[:3])
     if not has_heading:
         return False
-    # Must have dot leaders (typical of TOC entries)
-    has_leaders = any(TOC_DOT_LEADERS_RE.search(l) for l in lines)
-    return has_leaders
+    # Either classic dot leaders ('Title ............ 14') or a column of
+    # entry lines ('CHAPTER 4' / 'FAMINE OVER EUROPE' / '28' — Unfinished
+    # Victory's contents have no dot leaders at all).
+    if any(TOC_DOT_LEADERS_RE.search(l) for l in lines):
+        return True
+    return _toc_entry_lines(lines) >= 3
 
 
 def _is_dedication_page(page_num: int, text: str, stats: dict) -> bool:
@@ -191,6 +216,26 @@ def _is_dedication_page(page_num: int, text: str, stats: dict) -> bool:
     if stats["centering_ratio"] > 0.5 and stats["non_empty_lines"] <= 3:
         return True
     return False
+
+
+EPIGRAPH_MAX_CHARS = 900
+EPIGRAPH_MAX_LINES = 18
+EPIGRAPH_PAGE_RE = re.compile(r"[\u201c\u201d\"]")
+EPIGRAPH_ATTRIBUTION_RE = re.compile(r"^[A-Z][A-Z'\-]{2,19}$")
+
+
+def _is_epigraph_page(page_num: int, text: str, stats: dict) -> bool:
+    """Check if a page looks like an epigraph (a quote with an ALL-CAPS attribution).
+
+    Catches the 'History is philosophy learned from examples.' THUCYDIDES
+    page between the dedication and the contents."""
+    if page_num < 2 or page_num > 6:
+        return False
+    if stats["total_chars"] > EPIGRAPH_MAX_CHARS or stats["non_empty_lines"] > EPIGRAPH_MAX_LINES:
+        return False
+    if not EPIGRAPH_PAGE_RE.search(text):
+        return False
+    return any(EPIGRAPH_ATTRIBUTION_RE.match(l) for l in stats["lines"])
 
 
 def _match_section_heading(text: str, pattern: re.Pattern) -> bool:
@@ -239,32 +284,32 @@ def classify_frontmatter(pages: list[dict]) -> dict[int, str]:
             if _is_copyright_page(page_num, text):
                 result[page_num] = "frontmatter-copyright"
                 continue
-            if _is_title_page(page_num, text, stats):
+            # Only one title page: p2 is often a dedication ('IN MEMORY OF
+            # HENRY TENNANT') that also looks short and centered.
+            if "frontmatter-title" not in result.values() and _is_title_page(page_num, text, stats):
                 result[page_num] = "frontmatter-title"
-                continue
-            if _is_toc_page(page_num, text, stats):
-                result[page_num] = "frontmatter-toc"
                 continue
             if _is_dedication_page(page_num, text, stats):
                 result[page_num] = "frontmatter-dedication"
                 continue
-            if _match_section_heading(text, PREFACE_RE):
-                result[page_num] = "frontmatter-preface"
-                continue
-            if _match_section_heading(text, FOREWORD_RE):
-                result[page_num] = "frontmatter-foreword"
-                continue
-            if _match_section_heading(text, INTRODUCTION_RE):
-                result[page_num] = "frontmatter-introduction"
-                continue
-            if _match_section_heading(text, ACKNOWLEDGMENTS_RE):
-                result[page_num] = "frontmatter-acknowledgments"
+            if _is_epigraph_page(page_num, text, stats):
+                result[page_num] = "frontmatter-epigraph"
                 continue
 
             # Once we hit a page that's clearly body text (long, dense),
-            # stop looking for frontmatter
+            # stop looking for frontmatter. Preface/foreword/introduction
+            # pages are NOT classified here: structure.py's unnumbered-section
+            # detection owns them (it produces a section spanning the whole
+            # preface, not just the heading page).
             if stats["total_chars"] > 500 and stats["non_empty_lines"] > 10:
                 frontmatter_done = True
+
+        # Contents pages are position-bound and a strong signal on their own;
+        # check them even after the done-flag tripped (a long epigraph page
+        # must not hide the CONTENTS page that follows it).
+        if page_num <= FRONTMATTER_MAX_PAGE and _is_toc_page(page_num, text, stats):
+            result[page_num] = "frontmatter-toc"
+            continue
 
         # Backmatter detection (only in the last N pages)
         backmatter = _is_backmatter_page(page_num, total_pages, text)
@@ -281,6 +326,7 @@ def get_frontmatter_reason(section: str) -> str:
         "frontmatter-copyright": "copyright",
         "frontmatter-toc": "table of contents",
         "frontmatter-dedication": "dedication",
+        "frontmatter-epigraph": "epigraph",
         "frontmatter-preface": "preface",
         "frontmatter-foreword": "foreword",
         "frontmatter-introduction": "introduction",

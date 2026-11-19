@@ -208,13 +208,20 @@ def classify_page(page: dict) -> tuple[str, str]:
     lower = text.lower()
     if re.search(r"copyright|all rights reserved|isbn", lower):
         return "kept", "copyright"
-    if re.search(r"^\s*(table of contents|contents)\s*$", text, re.MULTILINE):
+    # Frontmatter headings sit at the top of the page; a mid-page line
+    # ("For events outstripped me.") must not reclassify the page.
+    top = "\n".join(text.split("\n")[:6])
+    top_lower = top.lower()
+    if re.search(r"^\s*(table of contents|contents)\s*$", top, re.MULTILINE):
         return "kept", "table of contents"
-    if re.search(r"^\s*(dedication|for\s+\w+)", lower, re.MULTILINE):
+    # Only a literal DEDICATION heading here: 'For <word>' matches ordinary
+    # sentence openings ('For events outstripped me.') at the top of body
+    # pages. True dedication pages are labeled by frontmatter.classify_frontmatter.
+    if re.search(r"^\s*dedication\b", top_lower, re.MULTILINE):
         return "kept", "dedication"
-    if re.search(r"^\s*(acknowledgments?|acknowledgements?)\s*$", lower, re.MULTILINE):
+    if re.search(r"^\s*(acknowledgments?|acknowledgements?)\s*$", top_lower, re.MULTILINE):
         return "kept", "acknowledgments"
-    if re.search(r"^\s*(index|bibliography|references|glossary)\s*$", lower, re.MULTILINE):
+    if re.search(r"^\s*(index|bibliography|references|glossary)\s*$", top_lower, re.MULTILINE):
         return "kept", "backmatter"
 
     if re.match(r"^\s*(chapter|part|book|prologue|epilogue|preface|foreword|introduction)\s+\d+", lower):
@@ -226,12 +233,21 @@ def classify_page(page: dict) -> tuple[str, str]:
 def detect_chapters(pages: list[dict]) -> list[dict]:
     """Detect chapter boundaries using the old pipeline's structure detection.
 
+    Pages classified as a printed table of contents are excluded from the
+    scan: their 'CHAPTER N' entry lines would otherwise be read as real
+    chapter headings (Unfinished Victory p.4 yields a bogus 'Chapter 1'
+    from its CONTENTS page).
+
     Falls back to the naive regex if the old pipeline's detection fails
     (e.g., no units available).
     """
+    from worker.prep import frontmatter as fm
     from worker.prep import structure
 
-    units = pages_to_units(pages)
+    fm_map = fm.classify_frontmatter(pages)
+    scan_pages = [p for p in pages if fm_map.get(p["page"]) != "frontmatter-toc"]
+
+    units = pages_to_units(scan_pages)
     try:
         heads = structure.find_headings(units)
         if heads:
@@ -243,10 +259,17 @@ def detect_chapters(pages: list[dict]) -> list[dict]:
                 else:
                     last_unit = len(units) - 1
                 title = h.get("title") or f"Chapter {h['number']}"
+                if h.get("label"):
+                    # An unnumbered section (Introduction, Part I, ...) keeps
+                    # its printed name as the section id.
+                    slug = re.sub(r"[^a-z0-9]+", "-", h["label"].lower()).strip("-")
+                    section = f"section-{slug}"
+                else:
+                    section = f"chapter-{h['number']}"
                 ch = {
                     "number": h["number"],
                     "title": title,
-                    "section": f"chapter-{h['number']}",
+                    "section": section,
                     "start_page": units[h["unit"]]["pdf_page"],
                     "end_page": units[last_unit]["pdf_page"],
                     "pages": [units[i]["pdf_page"] for i in range(h["unit"], last_unit + 1)],
@@ -261,8 +284,8 @@ def detect_chapters(pages: list[dict]) -> list[dict]:
     except Exception:
         pass
 
-    # Fallback: naive regex detection
-    return _detect_chapters_naive(pages)
+    # Fallback: naive regex detection (TOC pages excluded here too)
+    return _detect_chapters_naive(scan_pages)
 
 
 def _detect_chapters_naive(pages: list[dict]) -> list[dict]:
