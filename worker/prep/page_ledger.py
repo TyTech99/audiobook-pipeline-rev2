@@ -168,8 +168,15 @@ def validate_page_ledger(ledger: dict, source_count: int) -> list[str]:
 
     if ledger["source_format"] == "pdf":
         page_numbers = [e["page"] for e in entries]
-        if sorted(page_numbers) != list(range(1, expected_count + 1)):
-            errors.append("Page numbers have gaps or duplicates")
+        # Contiguity, not start-at-1: a job may process a mid-book
+        # page_range (e.g. [3, 4]) to sample a chapter or skip leading
+        # scan/utility pages — the ledger is valid as long as its pages
+        # form one unbroken run (#55). Count mismatches are already
+        # flagged above by the expected_count check.
+        if page_numbers:
+            first = min(page_numbers)
+            if sorted(page_numbers) != list(range(first, first + expected_count)):
+                errors.append("Page numbers have gaps or duplicates")
 
     for e in entries:
         if e["action"] not in ("kept", "skipped"):

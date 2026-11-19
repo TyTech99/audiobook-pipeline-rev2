@@ -165,6 +165,36 @@ def test_validate_page_ledger_catches_gaps():
     assert any("gaps" in e for e in errors)
 
 
+def _range_ledger(pages):
+    return {
+        "source_format": "pdf",
+        "source_file": "test.pdf",
+        "total_pages": len(pages),
+        "pages": [
+            {"page": p, "action": "kept", "reason": "body text", "section": "chapter-1"}
+            for p in pages
+        ],
+        "structure": [],
+        "summary": {"total": len(pages), "kept": len(pages), "skipped": 0, "skipped_breakdown": {}},
+    }
+
+
+def test_validate_page_ledger_accepts_mid_book_range():
+    # #55: a contiguous range that does not start at 1 is valid —
+    # mid-book sampling and skip-past-junk workflows.
+    assert validate_page_ledger(_range_ledger([3, 4]), 2) == []
+
+
+def test_validate_page_ledger_catches_gap_inside_range():
+    errors = validate_page_ledger(_range_ledger([3, 5]), 2)
+    assert any("gaps" in e for e in errors)
+
+
+def test_validate_page_ledger_catches_duplicates():
+    errors = validate_page_ledger(_range_ledger([3, 3]), 2)
+    assert any("gaps" in e for e in errors)  # duplicates break the run too
+
+
 def test_build_narrator_script():
     pages = [
         {"page": 1, "text": "Chapter 1\n\nThis is the first sentence. This is the second sentence.", "images": 0, "action": "kept", "reason": "body text"},
