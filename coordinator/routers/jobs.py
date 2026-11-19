@@ -1,5 +1,7 @@
 from uuid import UUID, uuid4
 
+import os
+
 from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from psycopg import Connection
 
@@ -137,3 +139,27 @@ def cancel_job(
     conn: Connection = Depends(get_conn),
 ):
     return job_service.cancel_job(conn, job_id, request.app.state.redis)
+
+
+@router.get("/{job_id}/artifacts")
+def list_job_artifacts(
+    job_id: UUID,
+    _: Principal = Depends(require_operator),
+    conn: Connection = Depends(get_conn),
+):
+    """List a job's downloadable artifacts (#57)."""
+    return job_service.list_artifacts(conn, job_id)
+
+
+@router.get("/{job_id}/artifacts/{filename:path}")
+def download_job_artifact(
+    job_id: UUID,
+    filename: str,
+    _: Principal = Depends(require_operator),
+    conn: Connection = Depends(get_conn),
+):
+    """Download one artifact as an attachment (#57)."""
+    from fastapi.responses import FileResponse
+
+    path, media_type = job_service.get_artifact(conn, job_id, filename)
+    return FileResponse(path, media_type=media_type, filename=os.path.basename(filename))

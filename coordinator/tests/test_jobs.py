@@ -214,3 +214,98 @@ def test_health_shows_queue_depths(app):
     response = app.get("/health")
     assert response.status_code == 200
     assert response.json()["queue_depths"]["prep"] == 1
+
+
+# --- #57: artifact listing + download ---
+
+
+def _insert_finished_job(sql, job_id, package_url):
+    sql(
+        """
+        INSERT INTO jobs (
+            job_id, type, status, input_format, input_url, package_url, metadata,
+            prep, convert, progress, error, retry_count, created_at, updated_at
+        ) VALUES (
+            %s, 'prep', 'prep_complete', 'pdf', 'file:///input/x.pdf', %s, '{}'::jsonb,
+            '{}'::jsonb, '{}'::jsonb, '{}'::jsonb, NULL, 0, now(), now()
+        )
+        """,
+        (job_id, package_url),
+    )
+
+
+def test_list_and_download_artifacts(app, sql, tmp_path):
+    pkg = tmp_path / "pkg"
+    (pkg / "m4b").mkdir(parents=True)
+    (pkg / "book.epub").write_bytes(b"EPUBDATA")
+    (pkg / "cover.jpg").write_bytes(b"JPGDATA")
+    (pkg / "m4b" / "audiobook.m4b").write_bytes(b"M4BDATA")
+    job_id = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0a"
+    # Workers report bare absolute paths (no file:// prefix) — the API's
+    # own submit path stores file:// URLs. Both must resolve (#57).
+    _insert_finished_job(sql, job_id, f"file://{pkg}/")
+
+    bare_job = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0d"
+    _insert_finished_job(sql, bare_job, f"{pkg}/")
+    bare_resp = app.get(f"/api/v1/jobs/{bare_job}/artifacts", headers=OP)
+    assert bare_resp.status_code == 200
+    assert {a["filename"] for a in bare_resp.json()["artifacts"]} == {
+        "book.epub", "cover.jpg", "m4b/audiobook.m4b",
+    }
+
+    resp = app.get(f"/api/v1/jobs/{job_id}/artifacts", headers=OP)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "prep_complete"
+    names = {a["filename"] for a in body["artifacts"]}
+    assert names == {"book.epub", "cover.jpg", "m4b/audiobook.m4b"}
+    media = {a["filename"]: a["media_type"] for a in body["artifacts"]}
+    assert media["book.epub"] == "application/epub+zip"
+    assert media["m4b/audiobook.m4b"] == "audio/mp4"
+    assert media["cover.jpg"] == "image/jpeg"
+
+    dl = app.get(f"/api/v1/jobs/{job_id}/artifacts/book.epub", headers=OP)
+    assert dl.status_code == 200
+    assert dl.content == b"EPUBDATA"
+    assert dl.headers["content-type"].startswith("application/epub+zip")
+    assert "attachment" in dl.headers.get("content-disposition", "")
+
+    nested = app.get(f"/api/v1/jobs/{job_id}/artifacts/m4b/audiobook.m4b", headers=OP)
+    assert nested.status_code == 200
+    assert nested.content == b"M4BDATA"
+
+
+def test_artifact_guards(app, sql, tmp_path):
+    import pytest as _pytest
+
+    from coordinator.errors import ApiError
+    from coordinator.services.jobs import get_artifact
+
+    pkg = tmp_path / "pkg2"
+    pkg.mkdir()
+    (pkg / "book.epub").write_bytes(b"EPUBDATA")
+    job_id = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0b"
+    _insert_finished_job(sql, job_id, f"file://{pkg}/")
+    no_pkg_job = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0c"
+    _insert_finished_job(sql, no_pkg_job, None)
+
+    # Traversal and exotic filenames are rejected before any filesystem access.
+    with app.app.state.pool.connection() as conn:
+        with _pytest.raises(ApiError) as trav:
+            get_artifact(conn, job_id, "../outside")
+        assert trav.value.status == 400
+        with _pytest.raises(ApiError) as weird:
+            get_artifact(conn, job_id, "we;ird name")
+        assert weird.value.status == 400
+        with _pytest.raises(ApiError) as missing:
+            get_artifact(conn, job_id, "nope.epub")
+        assert missing.value.status == 404
+
+    # Job with no package_url -> artifacts_not_found.
+    resp = app.get(f"/api/v1/jobs/{no_pkg_job}/artifacts", headers=OP)
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "artifacts_not_found"
+
+    # Unknown job -> 404.
+    resp = app.get("/api/v1/jobs/0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0f/artifacts", headers=OP)
+    assert resp.status_code == 404
