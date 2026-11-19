@@ -214,7 +214,10 @@ def classify_page(page: dict) -> tuple[str, str]:
     top_lower = top.lower()
     if re.search(r"^\s*(table of contents|contents)\s*$", top, re.MULTILINE):
         return "kept", "table of contents"
-    if re.search(r"^\s*(dedication|for\s+\w+)", top_lower, re.MULTILINE):
+    # Only a literal DEDICATION heading here: 'For <word>' matches ordinary
+    # sentence openings ('For events outstripped me.') at the top of body
+    # pages. True dedication pages are labeled by frontmatter.classify_frontmatter.
+    if re.search(r"^\s*dedication\b", top_lower, re.MULTILINE):
         return "kept", "dedication"
     if re.search(r"^\s*(acknowledgments?|acknowledgements?)\s*$", top_lower, re.MULTILINE):
         return "kept", "acknowledgments"
