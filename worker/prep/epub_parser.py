@@ -144,9 +144,13 @@ def classify_epub_item(page: dict) -> tuple[str, str]:
     lower = text.lower()
     if re.search(r"copyright|all rights reserved|isbn", lower):
         return "kept", "copyright"
-    if re.search(r"^\s*(table of contents|contents)\s*$", text, re.MULTILINE):
+    # Frontmatter headings sit at the top of the item; a mid-item line
+    # ("For events outstripped me.") must not reclassify the item. Only a
+    # literal DEDICATION heading counts (same rule as classify_page).
+    top = "\n".join(text.split("\n")[:6])
+    if re.search(r"^\s*(table of contents|contents)\s*$", top, re.MULTILINE):
         return "kept", "table of contents"
-    if re.search(r"^\s*(dedication|for\s+\w+)", lower, re.MULTILINE):
+    if re.search(r"^\s*dedication\b", top.lower(), re.MULTILINE):
         return "kept", "dedication"
 
     if re.match(r"^\s*(chapter|part|book|prologue|epilogue|preface|foreword|introduction)\s+\d+", lower):
