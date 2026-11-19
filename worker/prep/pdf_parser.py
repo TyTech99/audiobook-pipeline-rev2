@@ -178,17 +178,19 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
     if ocr_count > 0:
         logger.info("OCR used for %d of %d pages (%d LLM cleaned)", ocr_count, len(pages), llm_cleanup_count)
 
-    # Deterministic fragment-completion repairs (#70): consume the
-    # non-dictionary declarations as repair input, now that every page is
-    # parsed and the full book corpus is available for the witness check.
+    # Deterministic fragment-completion repairs (#70) and joined-word
+    # repairs (#72): consume the non-dictionary declarations as repair
+    # input, now that every page is parsed and the full book corpus is
+    # available for the witness check.
     from worker.prep import ocr_cleanup
 
     fragment_repairs = ocr_cleanup.repair_fragment_completions(pages, language)
-    if fragment_repairs:
+    joined_repairs = ocr_cleanup.repair_joined_words(pages, language)
+    if fragment_repairs or joined_repairs:
         logger.info(
-            "Fragment completions: %d repairs over %d pages",
+            "Deterministic repairs: %d fragment completions, %d joined words",
             len(fragment_repairs),
-            len({r.get("page") for r in fragment_repairs}),
+            len(joined_repairs),
         )
 
     return {

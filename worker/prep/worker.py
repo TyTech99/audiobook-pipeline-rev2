@@ -209,6 +209,7 @@ class PrepWorker:
         declared_sites: list[dict] = []
         ocr_quality_pages: list[dict] = []
         fragment_repair_records: list[dict] = []
+        joined_repair_records: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -291,6 +292,7 @@ class PrepWorker:
                 declared_by_page[p["page"]] = declare_page_words(p["page"], p.get("text", ""), job_language)
             declared_sites = [s for sites in declared_by_page.values() for s in sites]
             fragment_repair_records = [r for p in raw_pages for r in (p.get("fragment_repairs") or [])]
+            joined_repair_records = [r for p in raw_pages for r in (p.get("joined_repairs") or [])]
             ocr_quality_pages = [
                 {
                     "page": p["page"],
@@ -300,6 +302,7 @@ class PrepWorker:
                     "passed": (p.get("ocr_quality") or {}).get("passed"),
                     "cleaned": bool(p.get("cleanup")),
                     "fragment_repairs": len(p.get("fragment_repairs") or []),
+                    "joined_repairs": len(p.get("joined_repairs") or []),
                     "declared_words": len(declared_by_page.get(p["page"], [])),
                 }
                 for p in raw_pages
@@ -431,17 +434,22 @@ class PrepWorker:
             # repairs — unique dictionary completion, book-witnessed.
             "fragment_completions_applied": len(fragment_repair_records),
             "fragment_completions": fragment_repair_records[:50],
+            # Joined words (#72): deterministic missing-space repairs —
+            # unique full decomposition into book-witnessed dictionary words.
+            "joined_words_applied": len(joined_repair_records),
+            "joined_words": joined_repair_records[:50],
             "unattributed_changes": 0,
         }
         logger.info(
             "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d "
-            "declared_words=%d fragment_completions=%d unattributed=0",
+            "declared_words=%d fragment_completions=%d joined_words=%d unattributed=0",
             fidelity["changes_kept"],
             fidelity["changes_reverted"],
             fidelity["structural_reverts"],
             fidelity["low_conf_word_sites"],
             fidelity["declared_word_sites"],
             fidelity["fragment_completions_applied"],
+            fidelity["joined_words_applied"],
         )
 
         package = {
@@ -465,6 +473,7 @@ class PrepWorker:
                         "low_conf_word_sites": fidelity["low_conf_word_sites"],
                         "declared_word_sites": fidelity["declared_word_sites"],
                         "fragment_completions_applied": fidelity["fragment_completions_applied"],
+                        "joined_words_applied": fidelity["joined_words_applied"],
                         "unattributed_changes": fidelity["unattributed_changes"],
                     },
                 },

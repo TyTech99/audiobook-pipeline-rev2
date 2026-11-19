@@ -464,6 +464,110 @@ def repair_fragment_completions(pages: list[dict], language: str = "eng") -> lis
     return records
 
 
+# Minimum total length for a joined-words candidate (#72): the observed
+# class is five letters and up ('didso', 'anend', 'himnoharm').
+_MIN_JOINED_LEN = 5
+
+
+def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
+    """Deterministic missing-space repairs for joined dictionary words (#72).
+
+    A declared (non-dictionary) word on an OCR page is repaired in place iff
+    it has EXACTLY ONE full decomposition into dictionary words — every
+    segment at least two letters and witnessed in the book's own parsed
+    text:
+
+        'didso' -> did | so        'anend' -> an | end
+        'himnoharm' -> him | no | harm
+
+    Ambiguity refuses: two valid decompositions means no repair, ever
+    ('formore' splits for|more AND form|ore — it stays declared). Words
+    that do not decompose (proper nouns, substitution-shaped damage like
+    'scon') stay declared for #66's image pass. Only OCR pages are
+    touched; text-layer pages are the book's own typeset text. Returns
+    per-page records; each repaired page's "text" is updated in place and
+    "joined_repairs" set.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("joined-word repair unavailable: %s", e)
+        return []
+    corpus_words = set()
+    for p in pages:
+        corpus_words.update(dicts.counted(p.get("text", "")))
+
+    def _unique_decomposition(token: str) -> list[str] | None:
+        memo: dict[int, list[list[str]]] = {}
+
+        def decompose(start: int) -> list[list[str]]:
+            if start in memo:
+                return memo[start]
+            results: list[list[str]] = []
+            if start == len(token):
+                results = [[]]
+            else:
+                for end in range(start + 2, len(token) + 1):
+                    if token[start:end] in dictionary:
+                        for rest in decompose(end):
+                            results.append([token[start:end]] + rest)
+                            if len(results) > 1:
+                                break
+                        if len(results) > 1:
+                            break
+            memo[start] = results
+            return results
+
+        ways = [w for w in decompose(0) if len(w) > 1]
+        if len(ways) == 1 and all(seg in corpus_words for seg in ways[0]):
+            return ways[0]
+        return None
+
+    records: list[dict] = []
+    for p in pages:
+        # Text-layer pages are the book's own typeset text — never repaired.
+        if not p.get("ocr_quality"):
+            continue
+        text = p.get("text", "")
+        if not text:
+            continue
+        counts: dict[str, int] = {}
+        for token in dicts.counted(text):
+            if len(token) < _MIN_JOINED_LEN or token in dictionary or token.split("'")[0] in dictionary:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+        repairs: dict[str, list[str]] = {}
+        for token in counts:
+            parts = _unique_decomposition(token)
+            if parts:
+                repairs[token] = parts
+        if not repairs:
+            p["joined_repairs"] = None
+            continue
+        for token, parts in repairs.items():
+            replacement = " ".join(parts)
+            pattern = re.compile(r"\b" + re.escape(token) + r"\b", re.IGNORECASE)
+
+            def _sub(match, replacement=replacement):
+                found = match.group(0)
+                return replacement.capitalize() if found[:1].isupper() else replacement
+
+            text = pattern.sub(_sub, text)
+            records.append(
+                {
+                    "page": p.get("page"),
+                    "word": token,
+                    "words": parts,
+                    "count": counts.get(token, 0),
+                }
+            )
+        p["text"] = text
+        p["joined_repairs"] = [r for r in records if r.get("page") == p.get("page")]
+    return records
+
+
 # How each gate reason is explained to the cleanup model. A generic
 # 'fix obvious OCR errors' does not engage the model: at 27B the damage
 # passes through unchanged. With the damage CLASS described (verified
