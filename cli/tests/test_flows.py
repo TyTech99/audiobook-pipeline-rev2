@@ -209,6 +209,7 @@ def test_update_coordinator_deploys_the_nested_package_and_verifies(monkeypatch,
 def test_update_coordinator_fails_when_the_image_does_not_match(monkeypatch, tmp_path):
     host = MemoryHost()
     install_coordinator(host, coordinator_state(), [])
+    before_revision = host.read(linux_paths()["coordinator_prefix"] + "/REVISION")
     monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
     calls: list = []
     monkeypatch.setattr(
@@ -219,7 +220,9 @@ def test_update_coordinator_fails_when_the_image_does_not_match(monkeypatch, tmp
     result = update_role(host, str(_update_source_tree(tmp_path)), "coordinator", messages)
     assert result["code"] == EXIT_FAILED and result["changed"] is True
     assert any("does not match" in line for line in messages)
+    # The package synced, but REVISION still records the deployed (old) code.
     assert host.read(linux_paths()["coordinator_prefix"] + "/coordinator/main.py") == "MAIN = 'new'\n"
+    assert host.read(linux_paths()["coordinator_prefix"] + "/REVISION") == before_revision
 
 
 def test_update_node_syncs_restarts_and_keeps_operator_config(monkeypatch, tmp_path):
@@ -268,6 +271,7 @@ def test_update_node_reports_a_unit_restart_failure(monkeypatch, tmp_path):
 
     host = RestartFails(ips=["10.0.0.5"])
     install_node(host, node_state(), FakeApi(), [])
+    before_revision = host.read(linux_paths()["node_prefix"] + "/REVISION")
     monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
     calls: list = []
     monkeypatch.setattr(
@@ -278,8 +282,10 @@ def test_update_node_reports_a_unit_restart_failure(monkeypatch, tmp_path):
     result = update_role(host, str(_update_source_tree(tmp_path)), "node", messages)
     assert result["code"] == EXIT_FAILED
     assert any("timed out" in line for line in messages)
-    # Files were synced before the restart failed, so a rerun is safe.
+    # Files were synced before the restart failed, so a rerun is safe — but
+    # REVISION still records the deployed (old) code.
     assert host.read(linux_paths()["node_prefix"] + "/supervisor/supervisor.py") == "SUPERVISOR = 'new'\n"
+    assert host.read(linux_paths()["node_prefix"] + "/REVISION") == before_revision
 
 
 def test_update_refuses_windows_non_root_bad_source_and_uninstalled(tmp_path):

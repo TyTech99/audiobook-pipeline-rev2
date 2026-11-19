@@ -395,7 +395,6 @@ def _update_coordinator(host, root: Path, revision: str, messages: list[str]) ->
     host.remove_prefix(prefix + "/coordinator")
     _copy_tree(host, package, prefix + "/coordinator")
     host.write(prefix + "/coordinator.Dockerfile", (root / "deploy" / "coordinator.Dockerfile").read_text())
-    host.write(prefix + "/REVISION", revision)
     build = _run(["docker", "compose", "-f", compose, "build", "coordinator"])
     if build.returncode != 0:
         messages.append("coordinator build failed: " + _tail(build))
@@ -406,6 +405,8 @@ def _update_coordinator(host, root: Path, revision: str, messages: list[str]) ->
         return {"code": EXIT_FAILED, "changed": True}
     if not _verify_compose_service(compose, "coordinator", messages):
         return {"code": EXIT_FAILED, "changed": True}
+    # REVISION records what is DEPLOYED — stamp it only after verification.
+    host.write(prefix + "/REVISION", revision)
     messages.append(f"coordinator updated (revision {revision[:12]})")
     return {"code": EXIT_OK, "changed": True}
 
@@ -430,7 +431,6 @@ def _update_node(host, root: Path, revision: str, messages: list[str]) -> dict:
     host.remove_prefix(prefix + "/recipe")
     _copy_tree(host, packages["recipe"], prefix + "/recipe")
     _write_node_build_files(host, root, prefix)
-    host.write(prefix + "/REVISION", revision)
     try:
         host.restart(unit)
     except Exception as exc:  # noqa: BLE001 - a failed systemctl restart is a deploy failure
@@ -444,6 +444,8 @@ def _update_node(host, root: Path, revision: str, messages: list[str]) -> dict:
     if not _image_ids_match(container.stdout.strip(), built.stdout.strip()):
         messages.append("supervisor container does not run the built image; check journalctl -u " + unit)
         return {"code": EXIT_FAILED, "changed": True}
+    # REVISION records what is DEPLOYED — stamp it only after verification.
+    host.write(prefix + "/REVISION", revision)
     messages.append(f"node updated (revision {revision[:12]})")
     messages.append("worker images rebuilt; running workers self-replace on the next heartbeat")
     return {"code": EXIT_OK, "changed": True}
