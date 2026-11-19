@@ -20,19 +20,45 @@ EXIT_REBOOT = 4
 SUPERVISOR_IMAGE = "audiobook-supervisor:local"
 
 
-def _deployed_revision() -> str:
-    """Return the git commit hash of the deployed code, or 'unknown' if unavailable."""
+def _git_revision(cwd: Path) -> str:
+    """Return the git commit hash at cwd, or 'unknown' if unavailable."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             capture_output=True, text=True, timeout=5,
-            cwd=str(Path(__file__).resolve().parents[1]),
+            cwd=str(cwd),
         )
         if result.returncode == 0:
             return result.stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         pass
     return "unknown"
+
+
+def _deployed_revision() -> str:
+    """Return the git commit hash of the deployed code, or 'unknown' if unavailable."""
+    return _git_revision(Path(__file__).resolve().parents[1])
+
+
+def _run(argv: list[str]) -> subprocess.CompletedProcess:
+    """Run a deploy command and capture output without raising. Tests stub this."""
+    return subprocess.run(argv, capture_output=True, text=True, check=False)
+
+
+def _tail(result: subprocess.CompletedProcess, limit: int = 400) -> str:
+    text = (result.stderr or result.stdout or "").strip().replace("\n", " | ")
+    return text[-limit:]
+
+
+def _image_ids_match(container_image: str, built_image: str) -> bool:
+    """Compare a container's image reference with a built image ID.
+
+    `docker inspect --format {{.Image}}` returns `sha256:<full id>`;
+    compose image listings may return a short id. Compare on the hex part.
+    """
+    a = (container_image or "").split("sha256:")[-1]
+    b = (built_image or "").split("sha256:")[-1]
+    return bool(a) and bool(b) and (a.startswith(b) or b.startswith(a))
 
 
 def coordinator_packages(state: dict) -> list[str]:
@@ -320,26 +346,133 @@ def apply_node(host, state: dict, api, messages: list[str], force: bool = False)
 
 
 def update_role(host, source: str, role: str, messages: list[str]) -> dict:
-    paths = linux_paths() if host.os_name != "windows" else windows_paths()
+    """Deploy code from a repo checkout into an installed prefix, then rebuild.
+
+    Syncs package code and the repo deploy/ build inputs only. Runtime state —
+    config/*.yaml, env files, and the rewritten compose file — is owned by
+    install/apply and never touched here, so an update cannot clobber
+    operator-edited LLM endpoints or secrets.
+
+    Coordinator: sync into the nested package dir, then compose build and
+    `up -d --force-recreate`, then verify the running container's image
+    equals the built image (issue #53: a flat top-level rsync deploys
+    nothing, and plain `up -d` was observed leaving a stale container
+    running with a success message).
+    Node: sync supervisor (nested), worker and recipe (flat), then
+    `systemctl restart` the supervisor unit — its ExecStartPre chain already
+    rebuilds the supervisor/worker/recipe images and recreates the
+    supervisor container. Running workers self-replace on the next
+    heartbeat once their image tag moves (#56).
+    """
+    if host.os_name == "windows":
+        messages.append("update is linux-only")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    if not host.is_root():
+        messages.append("update must run as root (sudo)")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    root = Path(source).resolve()
+    if not (root / "cli" / "flows.py").is_file():
+        messages.append(f"source is not the repo checkout: {source}")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    revision = _git_revision(root)
     if role == "coordinator":
-        if host.os_name == "windows":
-            return {"code": EXIT_PRECONDITION, "changed": False}
-        env_path = paths["coordinator_env"]
-        prefix = paths["coordinator_prefix"]
-        service = paths["coordinator_unit"]
-    else:
-        env_path = paths["node_env"]
-        prefix = paths["node_prefix"]
-        service = paths.get("node_task") if host.os_name == "windows" else paths["node_unit"]
-    before = host.read(env_path)
-    marker = Path(source, "MARKER")
-    content = marker.read_text() if marker.exists() else "updated"
-    host.write(prefix + "/MARKER", content)
-    host.restart(service)
-    if host.read(env_path) != before:
+        return _update_coordinator(host, root, revision, messages)
+    return _update_node(host, root, revision, messages)
+
+
+def _update_coordinator(host, root: Path, revision: str, messages: list[str]) -> dict:
+    paths = linux_paths()
+    prefix = paths["coordinator_prefix"]
+    compose = prefix + "/docker-compose.dev.yml"
+    if host.read(paths["coordinator_env"]) is None or host.read(compose) is None:
+        messages.append("coordinator is not installed; run 'coordinator install' first")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    package = root / "coordinator"
+    if not (package / "main.py").is_file() or not (root / "deploy" / "coordinator.Dockerfile").is_file():
+        messages.append("source is missing coordinator/ or deploy/coordinator.Dockerfile")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    # The compose build context only sees the nested package dir (#53).
+    host.remove_prefix(prefix + "/coordinator")
+    _copy_tree(host, package, prefix + "/coordinator")
+    host.write(prefix + "/coordinator.Dockerfile", (root / "deploy" / "coordinator.Dockerfile").read_text())
+    host.write(prefix + "/REVISION", revision)
+    build = _run(["docker", "compose", "-f", compose, "build", "coordinator"])
+    if build.returncode != 0:
+        messages.append("coordinator build failed: " + _tail(build))
         return {"code": EXIT_FAILED, "changed": True}
-    messages.append(f"{role} updated")
+    up = _run(["docker", "compose", "-f", compose, "up", "-d", "--force-recreate", "coordinator"])
+    if up.returncode != 0:
+        messages.append("coordinator recreate failed: " + _tail(up))
+        return {"code": EXIT_FAILED, "changed": True}
+    if not _verify_compose_service(compose, "coordinator", messages):
+        return {"code": EXIT_FAILED, "changed": True}
+    messages.append(f"coordinator updated (revision {revision[:12]})")
     return {"code": EXIT_OK, "changed": True}
+
+
+def _update_node(host, root: Path, revision: str, messages: list[str]) -> dict:
+    paths = linux_paths()
+    prefix = paths["node_prefix"]
+    unit = paths["node_unit"]
+    if host.read(paths["node_env"]) is None or unit not in host.units:
+        messages.append("node is not installed; run 'node install' first")
+        return {"code": EXIT_PRECONDITION, "changed": False}
+    packages = {"supervisor": root / "supervisor", "worker": root / "worker", "recipe": root / "recipe"}
+    for name, path in packages.items():
+        if not path.is_dir() or not any(path.iterdir()):
+            messages.append(f"source is missing the {name}/ package")
+            return {"code": EXIT_PRECONDITION, "changed": False}
+    # supervisor/ is nested; worker/ and recipe/ deploy flat (#53).
+    host.remove_prefix(prefix + "/supervisor")
+    _copy_tree(host, packages["supervisor"], prefix + "/supervisor")
+    host.remove_prefix(prefix + "/worker")
+    _copy_tree(host, packages["worker"], prefix + "/worker")
+    host.remove_prefix(prefix + "/recipe")
+    _copy_tree(host, packages["recipe"], prefix + "/recipe")
+    _write_node_build_files(host, root, prefix)
+    host.write(prefix + "/REVISION", revision)
+    try:
+        host.restart(unit)
+    except Exception as exc:  # noqa: BLE001 - a failed systemctl restart is a deploy failure
+        messages.append(f"supervisor unit restart failed: {exc}")
+        return {"code": EXIT_FAILED, "changed": True}
+    container = _run(["docker", "inspect", "audiobook-supervisor", "--format", "{{.Image}}"])
+    built = _run(["docker", "image", "inspect", SUPERVISOR_IMAGE, "--format", "{{.Id}}"])
+    if container.returncode != 0 or built.returncode != 0:
+        messages.append("supervisor container or image is missing after restart")
+        return {"code": EXIT_FAILED, "changed": True}
+    if not _image_ids_match(container.stdout.strip(), built.stdout.strip()):
+        messages.append("supervisor container does not run the built image; check journalctl -u " + unit)
+        return {"code": EXIT_FAILED, "changed": True}
+    messages.append(f"node updated (revision {revision[:12]})")
+    messages.append("worker images rebuilt; running workers self-replace on the next heartbeat")
+    return {"code": EXIT_OK, "changed": True}
+
+
+def _verify_compose_service(compose: str, service: str, messages: list[str]) -> bool:
+    """Fail unless the service's running container uses the freshly built image.
+
+    `docker compose up -d` was observed printing "Running" without
+    recreating a container whose image was stale (issue #53) — image
+    equality is the only trustworthy post-deploy check.
+    """
+    ps = _run(["docker", "compose", "-f", compose, "ps", "-q", service])
+    cid = ps.stdout.strip().splitlines()[0].strip() if ps.stdout.strip() else ""
+    if not cid:
+        messages.append(service + " container is not running")
+        return False
+    container = _run(["docker", "inspect", cid, "--format", "{{.Image}}"])
+    built = _run(["docker", "compose", "-f", compose, "images", "-q", service])
+    built_id = built.stdout.strip().splitlines()[0].strip() if built.stdout.strip() else ""
+    if not _image_ids_match(container.stdout.strip(), built_id):
+        messages.append(
+            service + " container image "
+            + container.stdout.strip()[:19]
+            + " does not match built image "
+            + built_id[:19]
+        )
+        return False
+    return True
 
 
 def uninstall_node(host, state: dict, api, purge: bool, local_only: bool, messages: list[str]) -> dict:
@@ -500,14 +633,26 @@ def _install_coordinator_files(host, prefix: str, state: dict) -> None:
     host.write(prefix + "/config/coordinator.yaml", (root / "config" / "coordinator.yaml").read_text())
 
 
+def _write_node_build_files(host, root: Path, prefix: str) -> None:
+    """Copy the repo deploy/ build inputs into the node prefix, verbatim.
+
+    One definition of which build files the node prefix needs — used by both
+    install (_install_supervisor_files) and update (_update_node).
+    """
+    for name in (
+        "supervisor.Dockerfile",
+        "worker-prep.Dockerfile",
+        "worker-tts.Dockerfile",
+        "recipe-michael.Dockerfile",
+        "probe.Dockerfile",
+        "build-images.sh",
+    ):
+        host.write(prefix + "/" + name, (root / "deploy" / name).read_text())
+
+
 def _install_supervisor_files(host, prefix: str, state: dict | None = None) -> None:
     root = _repo_root()
-    host.write(prefix + "/supervisor.Dockerfile", (root / "deploy" / "supervisor.Dockerfile").read_text())
-    host.write(prefix + "/worker-prep.Dockerfile", (root / "deploy" / "worker-prep.Dockerfile").read_text())
-    host.write(prefix + "/worker-tts.Dockerfile", (root / "deploy" / "worker-tts.Dockerfile").read_text())
-    host.write(prefix + "/recipe-michael.Dockerfile", (root / "deploy" / "recipe-michael.Dockerfile").read_text())
-    host.write(prefix + "/probe.Dockerfile", (root / "deploy" / "probe.Dockerfile").read_text())
-    host.write(prefix + "/build-images.sh", (root / "deploy" / "build-images.sh").read_text())
+    _write_node_build_files(host, root, prefix)
     host.write(prefix + "/record-hardware.sh", RECORD_HARDWARE)
     _copy_tree(host, root / "supervisor", prefix + "/supervisor")
     _copy_tree(host, root / "worker", prefix + "/worker")

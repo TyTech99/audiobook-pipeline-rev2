@@ -86,6 +86,17 @@ sudo docker ps --filter name=audiobook-supervisor
 
 For multi-host installs (separate coordinator and nodes), see [deploy/README.md](deploy/README.md).
 
+### Updating code
+
+After changing code, deploy it with the CLI instead of a manual rsync:
+
+```bash
+sudo PYTHONPATH=. python3 -m cli coordinator update --source .
+sudo PYTHONPATH=. python3 -m cli node update --source .
+```
+
+Both commands sync into the layout the build actually reads (the coordinator and supervisor packages are nested same-named dirs — a flat rsync silently deploys nothing), rebuild, force-recreate, and verify the running containers use the freshly built images. See [deploy/README.md](deploy/README.md#updating-code-on-an-installed-host).
+
 ## Config
 
 ### Operator key

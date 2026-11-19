@@ -205,6 +205,30 @@ Exit code 4 means Docker Desktop was installed and Windows wants a reboot. Reboo
 
 The task name is `AudiobookSupervisor`. It runs at startup as SYSTEM. Start Docker Desktop before you run the task, or the container exits.
 
+## Updating code on an installed host
+
+After changing code in the repo, deploy it with the CLI update commands — not with a manual `rsync`. Both build prefixes keep the Python package in a nested same-named directory (`/opt/audiobook/coordinator/coordinator/`, `/opt/audiobook/supervisor/supervisor/`) because the Dockerfiles build from the prefix root and `COPY` that directory. A flat `rsync` into the prefix top level silently deploys nothing: the build succeeds against the untouched nested copy (issue #53).
+
+```bash
+sudo PYTHONPATH=. python3 -m cli coordinator update --source .
+sudo PYTHONPATH=. python3 -m cli node update --source .
+```
+
+Run them from the repo checkout you want to deploy (any branch); `--source` is that checkout.
+
+What each command does:
+
+1. Syncs package code into the dir the build actually reads — the nested package dir for `coordinator update`; the nested supervisor package plus the flat `worker/` and `recipe/` dirs for `node update`.
+2. Copies the repo `deploy/` build inputs (Dockerfiles, `build-images.sh`) verbatim and stamps the prefix `REVISION` with the source commit.
+3. Rebuilds and recreates:
+   - `coordinator update` runs `docker compose build` then `up -d --force-recreate`, then verifies the running container's image equals the built image — plain `up -d` was once observed printing "Running" without recreating a container whose image was stale.
+   - `node update` restarts `audiobook-supervisor.service`; the unit's `ExecStartPre` rebuilds the supervisor, worker, and recipe images and recreates the supervisor container. Running worker containers self-replace on the next supervisor heartbeat once their image tag moves.
+4. Exits non-zero with a message on any failed build, failed recreate, or image mismatch.
+
+What update never touches: `config/*.yaml`, the env files, and the installed `docker-compose.dev.yml` are owned by `coordinator/node install` and `apply`. Operator edits there (LLM endpoints, working hours, the Redis bind rewrite) survive an update. Changing the compose file or unit definitions is an install/apply change, not an update.
+
+The update commands refuse to run on Windows, without root, against a source that is not the repo checkout, or on a host where the role was never installed.
+
 ## Usage
 
 Job submission and polling live in the [root README](../README.md#usage). The coordinator API reference is in [docs/api/coordinator-api.md](../docs/api/coordinator-api.md).
