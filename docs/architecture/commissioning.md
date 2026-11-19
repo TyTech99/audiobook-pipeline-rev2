@@ -167,7 +167,7 @@ The supervisor is a container started by `audiobook-supervisor.service`. The uni
 6. Copy `config/supervisor.yaml`. Set `node.id` from `NODE_ID`, the coordinator URL, image references pinned by digest, and the model mount for TTS. Image names in the sample config (`registry.example.com/...:latest`) are placeholders. Pin a digest before the accept step. A floating tag makes a later probe unreproducible.
 7. Create the model directory, owned by the user that will run inside the TTS container. The image does not contain weights. ADR-003 mounts them from the host.
 8. Add the node's address to the Redis firewall.
-9. Install `audiobook-supervisor.service`. `ExecStart` is `docker run` with `/var/run/docker.sock` mounted and `HARDWARE_FILE` set. `Restart=always`. `EnvironmentFile=/etc/audiobook/node.env`.
+9. Install `audiobook-supervisor.service` — the CLI generates the unit; there is no static unit file. `ExecStart` is `docker run` with `/var/run/docker.sock` mounted and `HARDWARE_FILE` set. `EnvironmentFile=/etc/audiobook/node.env`. The unit is `[Install]`-less (started by the installer or `node update`'s `systemctl restart`) and carries `TimeoutStartSec=1800` because its `ExecStartPre` builds every image; cold builds take minutes.
 10. Start the unit. The supervisor Python runs in the container, not from a host virtualenv.
 
 On startup the supervisor reads hardware and calls `POST /nodes/{node_id}/register`. The coordinator moves the row from `pending` to `commissioned`, stores the hardware JSON, and sets `effective_queues`. If the node has no GPU, `convert` is dropped from `effective_queues` and the response says so. The supervisor logs that and does not start TTS containers.
