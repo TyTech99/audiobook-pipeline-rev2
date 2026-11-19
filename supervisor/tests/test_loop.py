@@ -179,3 +179,125 @@ def test_hardware_without_nvml_has_null_gpu():
     info = detect_hardware()
     assert info["gpu"] is None
     assert info["cpu"] >= 1
+
+
+# --- #41: running workers are recreated when the image tag moved on ---
+
+class ImageAwareRunner(FakeRunner):
+    """FakeRunner plus image-ID resolution for the #41 drift tests."""
+
+    def __init__(self, running_image, expected_image, **kwargs):
+        super().__init__(**kwargs)
+        self.running_image = running_image
+        self.expected_image = expected_image
+        self.stopped = []
+        self.started = []
+
+    def worker_image_id(self, name: str) -> str | None:
+        return self.running_image
+
+    def image_id(self, tag: str) -> str | None:
+        return self.expected_image
+
+    def start_worker(self, name, image, env, gpu, volumes, extra_devices):
+        self.started.append((name, image))
+        self.already.add(name)
+        # A freshly created container runs the current image.
+        self.running_image = self.expected_image
+
+    def stop_worker(self, name):
+        self.stopped.append(name)
+        self.already.discard(name)
+
+
+def _worker_manager(runner):
+    import types
+    from typing import cast
+
+    client = cast(
+        CoordinatorClient,
+        types.SimpleNamespace(fail_probe=lambda *_a, **_k: None),
+    )
+    return DockerManager(
+        settings(prep_image="audiobook-worker-prep:local"), runner, client,
+    )
+
+
+def test_running_worker_with_current_image_is_not_recreated():
+    runner = ImageAwareRunner(
+        running_image="sha256:cur", expected_image="sha256:cur",
+        already=["audiobook-worker-prep"],
+    )
+    _worker_manager(runner).start_worker("prep")
+    assert runner.stopped == []
+    assert runner.started == []
+
+
+def test_running_worker_with_stale_image_is_recreated():
+    runner = ImageAwareRunner(
+        running_image="sha256:old", expected_image="sha256:new",
+        already=["audiobook-worker-prep"],
+    )
+    manager = _worker_manager(runner)
+    manager.start_worker("prep")
+    assert runner.stopped == ["audiobook-worker-prep"]
+    assert runner.started == [("audiobook-worker-prep", "audiobook-worker-prep:local")]
+    # Bookkeeping reset so the idle timer starts fresh.
+    assert "audiobook-worker-prep" in manager.worker_started_at
+
+
+def test_unknown_worker_image_id_does_not_recreate():
+    runner = ImageAwareRunner(
+        running_image=None, expected_image="sha256:new",
+        already=["audiobook-worker-prep"],
+    )
+    _worker_manager(runner).start_worker("prep")
+    assert runner.stopped == []
+    assert runner.started == []
+
+
+def test_stopped_worker_starts_fresh_from_current_image():
+    runner = ImageAwareRunner(
+        running_image="sha256:old", expected_image="sha256:new", already=[],
+    )
+    _worker_manager(runner).start_worker("prep")
+    assert runner.stopped == []
+    assert runner.started == [("audiobook-worker-prep", "audiobook-worker-prep:local")]
+
+
+def test_heartbeat_recreates_stale_worker_when_queue_quiet():
+    # A running worker claims new jobs faster than the heartbeat can react,
+    # so the drift check also runs on every heartbeat cycle (#41).
+    runner = ImageAwareRunner(
+        running_image="sha256:old", expected_image="sha256:new",
+        already=["audiobook-worker-prep"],
+    )
+    manager = _worker_manager(runner)
+    manager.check_worker_images({"prep": 0, "prep_processing": 0})
+    assert runner.stopped == ["audiobook-worker-prep"]
+    assert runner.started == [("audiobook-worker-prep", "audiobook-worker-prep:local")]
+    assert "audiobook-worker-prep" in manager.worker_started_at
+
+
+def test_heartbeat_never_recreates_when_jobs_in_flight():
+    runner = ImageAwareRunner(
+        running_image="sha256:old", expected_image="sha256:new",
+        already=["audiobook-worker-prep"],
+    )
+    manager = _worker_manager(runner)
+    manager.check_worker_images({"prep": 1, "prep_processing": 0})
+    manager.check_worker_images({"prep": 0, "prep_processing": 1})
+    assert runner.stopped == []
+    assert runner.started == []
+
+
+def test_heartbeat_ignores_missing_and_fresh_workers():
+    missing = ImageAwareRunner(running_image=None, expected_image="sha256:new", already=[])
+    _worker_manager(missing).check_worker_images({})
+    fresh = ImageAwareRunner(
+        running_image="sha256:cur", expected_image="sha256:cur",
+        already=["audiobook-worker-prep"],
+    )
+    _worker_manager(fresh).check_worker_images({"prep": 0, "prep_processing": 0})
+    assert missing.stopped == [] and missing.started == []
+    assert fresh.stopped == [] and fresh.started == []

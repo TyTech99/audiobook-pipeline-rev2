@@ -24,6 +24,14 @@ class ProbeRunner:
     def stop_worker(self, name: str) -> None:
         raise NotImplementedError
 
+    def worker_image_id(self, name: str) -> str | None:
+        """Image ID of the named running worker, or None when unknown."""
+        return None
+
+    def image_id(self, tag: str) -> str | None:
+        """Image ID the tag currently resolves to, or None when unknown."""
+        return None
+
 
 class DockerProbeRunner(ProbeRunner):
     def __init__(self):
@@ -100,6 +108,25 @@ class DockerProbeRunner(ProbeRunner):
         except Exception:
             pass
 
+    def worker_image_id(self, name: str) -> str | None:
+        try:
+            container = self.client.containers.get(name)
+            if container is None:
+                return None
+            # attrs["Image"] is the raw inspect value; it keeps working after
+            # the original image record was re-tagged or removed, unlike
+            # container.image, which 404s once the daemon forgets the image
+            # (exactly the rebuild case this check exists for).
+            return container.attrs.get("Image")
+        except Exception:
+            return None
+
+    def image_id(self, tag: str) -> str | None:
+        try:
+            return self.client.images.get(tag).id
+        except Exception:
+            return None
+
 
 class DockerManager:
     def __init__(self, settings: SupervisorSettings, runner: ProbeRunner, client: CoordinatorClient):
@@ -139,11 +166,15 @@ class DockerManager:
 
     def start_worker(self, worker_type: str) -> None:
         name = f"audiobook-worker-{worker_type}"
-        if self.runner.running(name):
+        if self.runner.running(name) and not self._worker_image_stale(name, worker_type):
             return
         image = self.settings.prep_image if worker_type == "prep" else self.settings.tts_image
         if not image:
             return
+        self._spawn_worker(worker_type, image)
+
+    def _spawn_worker(self, worker_type: str, image: str) -> None:
+        name = f"audiobook-worker-{worker_type}"
         logger.info("Starting worker: type=%s name=%s image=%s", worker_type, name, image)
         env = {
             "NODE_ID": self.settings.node_id,
@@ -189,6 +220,55 @@ class DockerManager:
         logger.info("Stopping worker: type=%s name=%s", worker_type, name)
         self.runner.stop_worker(name)
         self.worker_started_at.pop(name, None)
+
+    def _worker_image_stale(self, name: str, worker_type: str) -> bool:
+        """True when the running worker's image differs from the current tag (#41).
+
+        A rebuilt image used to silently never reach a running worker: the
+        running() guard returned early and the stale container kept serving
+        jobs until the idle timeout stopped it. Now the drift check stops
+        the stale container so the caller recreates it from the current
+        image. Unknown image IDs (None) never trigger a recreate.
+        """
+        current = self.runner.worker_image_id(name)
+        if current is None:
+            return False
+        tag = self.settings.prep_image if worker_type == "prep" else self.settings.tts_image
+        expected = self.runner.image_id(tag) if tag else None
+        if expected is None or current == expected:
+            return False
+        logger.info(
+            "Worker %s runs stale image %s (current build: %s); recreating",
+            name, current[:19], expected[:19],
+        )
+        self.stop_worker(worker_type)
+        return True
+
+    def check_worker_images(self, queue_depths: dict[str, int]) -> None:
+        """Recreate running workers whose image tag has moved on (#41).
+
+        Runs every heartbeat. The depth-triggered start_worker path alone
+        cannot catch this: a running worker claims new jobs within its own
+        poll window (~10s), faster than the supervisor's heartbeat (~30s),
+        so a rebuilt image would never be reached until the idle timeout
+        stopped the old container. Here the drift check runs each cycle and
+        recreates the stale worker as soon as its queue is quiet — a
+        rebuild now deploys within one heartbeat, and never kills a
+        mid-flight job (busy queues are skipped until the next cycle).
+        """
+        for worker_type in ("prep", "tts"):
+            name = f"audiobook-worker-{worker_type}"
+            if not self.runner.running(name):
+                continue
+            queue = "prep" if worker_type == "prep" else "convert"
+            if queue_depths.get(queue, 0) > 0 or queue_depths.get(f"{queue}_processing", 0) > 0:
+                continue
+            if not self._worker_image_stale(name, worker_type):
+                continue
+            image = self.settings.prep_image if worker_type == "prep" else self.settings.tts_image
+            if not image:
+                continue
+            self._spawn_worker(worker_type, image)
 
     def check_idle(self, queue_depths: dict[str, int], now: float | None = None) -> None:
         import time
