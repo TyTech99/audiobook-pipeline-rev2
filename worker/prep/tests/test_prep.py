@@ -793,3 +793,20 @@ def test_detect_chapters_uses_passed_fm_sections():
     chapters = detect_chapters(pages, fm_sections=fm_sections)
     assert len(chapters) == 1
     assert chapters[0]["start_page"] == 2
+
+
+def test_chapter_title_stops_at_epigraph_quote():
+    # Issue #44: Unfinished Victory ch.2 — the title collection must stop
+    # at the epigraph line that opens with a quotation mark. Chapter 1
+    # previously escaped only via the >100-char fallback; ch.2's short
+    # epigraph was swallowed into its title.
+    from worker.prep.structure import find_headings
+
+    units = [
+        {"pdf_page": 33, "half": None, "text": "CHAPTER I\nFAMINE OVER EUROPE\n\u2018\u201cT saw in vision the worm in the wheat\nAnd in the shops nothing for people to eat ;\nRALPH HODGSON\nIN the middle of the war famine came to central Europe.", "geom": None, "normalized": {}},
+        {"pdf_page": 60, "half": None, "text": "CHAPTER 2\nTHE POUND OF FLESH\n\u201cWhen we\u2019ve wound up the watch on the Rhine,\nO Keir Hardie no doubt will repine !\n\u2018Hurrah !\u2019 we\u2019ll cry,", "geom": None, "normalized": {}},
+    ]
+    heads = find_headings(units)
+    assert len(heads) == 2
+    assert heads[0]["title"] == "Famine Over Europe"
+    assert heads[1]["title"] == "The Pound of Flesh"

@@ -216,6 +216,11 @@ def find_headings(units):
                 tall = tall or hgt
                 # Stop at the first line that looks like body text (long, mixed-case sentence)
                 line_text = lines[k].strip()
+                # Stop at an epigraph/poem line: chapter opening quotes open with a
+                # quotation mark, chapter titles never do (Unfinished Victory ch.2,
+                # 'THE POUND OF FLESH' followed by '"When we've wound up the watch...').
+                if line_text and line_text[0] in "\u201c\u201d\u2018\u2019\"'":
+                    break
                 if len(line_text) > 40 and not pageparts._mostly_upper(line_text) and "." in line_text:
                     break
                 # Stop if the line looks like a full sentence (has punctuation, not a title)
