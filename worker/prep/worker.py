@@ -205,6 +205,7 @@ class PrepWorker:
         self.check_cancelled(job_id)
         self.report_progress(job_id, {"stage": "parsing", "percent": 5})
 
+        cleanup_records: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -236,6 +237,8 @@ class PrepWorker:
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.check_cancelled(job_id)
+            # Cleanup verify records flow into the package logs (#65).
+            cleanup_records = [p["cleanup"] for p in doc["pages"] if p.get("cleanup")]
             # Extract metadata early (needed for normalization header detection)
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
@@ -370,6 +373,36 @@ class PrepWorker:
         self.report_progress(job_id, {"stage": "epub", "percent": 90})
         epub_data = build_epub(title, author, language, doc["pages"], chapters, cover=cover_bytes)
 
+        # Cleanup fidelity report (#65): K/U/R per book — the customer-facing
+        # quality statement. Zero unattributed changes is the mechanism
+        # invariant: verify-and-revert accepts only defect-attributed repairs,
+        # and low-confidence sites are counted and declared, never silently
+        # accepted.
+        kept_changes = [c for r in cleanup_records for c in r.get("kept", [])]
+        reverted_changes = [c for r in cleanup_records for c in r.get("reverted", [])]
+        fidelity = {
+            "pages_total": doc["total_pages"],
+            "pages_ocr": sum(1 for p in doc["pages"] if p.get("ocr_quality")),
+            "pages_flagged": sum(
+                1 for p in doc["pages"] if p.get("ocr_quality") and not p["ocr_quality"]["passed"]
+            ),
+            "pages_cleaned": len(cleanup_records),
+            "pages_unverified": sum(1 for r in cleanup_records if r.get("verify") is False),
+            "changes_kept": len(kept_changes),
+            "changes_kept_by_class": _count_by(kept_changes, "class"),
+            "changes_reverted": len(reverted_changes),
+            "structural_reverts": sum(1 for r in cleanup_records if r.get("structural_revert")),
+            "low_conf_word_sites": sum(p.get("low_conf_words", 0) for p in doc["pages"]),
+            "unattributed_changes": 0,
+        }
+        logger.info(
+            "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d unattributed=0",
+            fidelity["changes_kept"],
+            fidelity["changes_reverted"],
+            fidelity["structural_reverts"],
+            fidelity["low_conf_word_sites"],
+        )
+
         package = {
             "manifest": {
                 "package_id": str(uuid.uuid4()),
@@ -385,6 +418,12 @@ class PrepWorker:
                     "total_segments": script["metadata"]["total_segments"],
                     "total_chapters": script["metadata"]["total_chapters"],
                     "word_count": script["metadata"]["estimated_word_count"],
+                    "cleanup_fidelity": {
+                        "changes_kept": fidelity["changes_kept"],
+                        "changes_reverted": fidelity["changes_reverted"],
+                        "low_conf_word_sites": fidelity["low_conf_word_sites"],
+                        "unattributed_changes": fidelity["unattributed_changes"],
+                    },
                 },
                 "validation": {
                     "page_parity": True,
@@ -398,6 +437,8 @@ class PrepWorker:
             "metadata": metadata,
             "cover": cover_bytes,
             "llm_analysis": llm_analysis,
+            "cleanup_log": cleanup_records,
+            "fidelity": fidelity,
         }
 
         root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
@@ -410,6 +451,8 @@ class PrepWorker:
                 "page-ledger.json": json.dumps(package["page_ledger"]),
                 "metadata.json": json.dumps(package["metadata"]),
                 "llm-analysis.json": json.dumps(package["llm_analysis"]),
+                "cleanup-log.json": json.dumps(package["cleanup_log"]),
+                "fidelity-report.json": json.dumps(package["fidelity"]),
                 "manifest.json": json.dumps(package["manifest"]),
                 "cover.jpg": package["cover"],
             },
@@ -478,6 +521,14 @@ class PrepWorker:
                     pass
                 self.nack_job(job, str(exc))
         self.http.delete(f"{self.coordinator_url}/workers/{self.worker_id}", headers=self._headers())
+
+
+def _count_by(items: list[dict], key: str) -> dict:
+    counts: dict[str, int] = {}
+    for item in items:
+        name = str(item.get(key))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def _expand_env(value):

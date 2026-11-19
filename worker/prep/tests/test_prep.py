@@ -506,6 +506,111 @@ def test_cleanup_prompt_carries_targeted_repair_instructions():
     assert "specific damage" not in captured["user"]
 
 
+def test_verify_cleanup_keeps_only_defect_attributed_repairs():
+    # Issue #65: default-revert. A change survives only when it repairs a
+    # site with a deterministic damage signature.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+
+    # digit-letter misread: '1x' (mixed digit+letter junk) -> 'no' — kept.
+    # A bare all-digit token ('10') is deliberately NOT attributable: text
+    # alone cannot tell it from a real numeral ('1940') — that class waits
+    # for the image-verification pass (#66).
+    text, record = verify_cleanup(22, "He said 1x other things.", "He said no other things.", settings)
+    assert text == "He said no other things."
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+    assert record["reverted"] == []
+
+    # clipped-line reconstruction: 'ry did not' -> 'Germany did not' — kept.
+    text, record = verify_cleanup(
+        22, "a victory. ry did not know", "a victory. Germany did not know", settings
+    )
+    assert text == "a victory. Germany did not know"
+    assert [c["class"] for c in record["kept"]] == ["clipped_line"]
+
+    # period-spelling 'fix': no damage signature — reverted whole.
+    text, record = verify_cleanup(31, "He slaid down his pen.", "He laid down his pen.", settings)
+    assert text == "He slaid down his pen."
+    assert record["kept"] == []
+    assert record["reverted"] and record["reverted"][0]["class"] == "replace"
+
+    # invented word: sameness -> sameliness — reverted.
+    text, record = verify_cleanup(28, "the sameness of it all", "the sameliness of it all", settings)
+    assert text == "the sameness of it all"
+    assert record["kept"] == []
+
+    # inserted word jitter ('a her close on a million') — reverted.
+    text, record = verify_cleanup(30, "her close on a million", "a her close on a million", settings)
+    assert text == "her close on a million"
+    assert record["kept"] == []
+
+
+def test_verify_cleanup_reverts_structural_damage():
+    # Issue #65: the line sequence is the paragraph witness.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+
+    # com-modities rupture: a line inserted at the hyphen — whole page reverts.
+    orig = "trade in com-\nmodities and goods"
+    ruptured = "trade in com-\nmodities and goods\nextra line appeared"
+    text, record = verify_cleanup(35, orig, ruptured, settings)
+    assert text == orig
+    assert record["structural_revert"] is True
+
+    # indent-only edit: paragraph structure changed — whole page reverts.
+    orig = "   first line\nsecond line"
+    indented = "       first line\nsecond line"
+    text, record = verify_cleanup(35, orig, indented, settings)
+    assert text == orig
+    assert record["structural_revert"] is True
+
+    # hyphen merge (2 lines -> 1): owned downstream by join_hyphen — reverted.
+    text, record = verify_cleanup(
+        35, "trade in com-\nmodities and goods", "trade in commodities and goods", settings
+    )
+    assert text == "trade in com-\nmodities and goods"
+    assert record["kept"] == []
+
+    # whole-line deletion (header removal): no damage signature — line kept.
+    orig = "UNFINISHED VICTORY\nthe body text of the page"
+    trimmed = "the body text of the page"
+    text, record = verify_cleanup(35, orig, trimmed, settings)
+    assert text == orig
+    assert any(c["class"] == "line_deleted" for c in record["reverted"])
+
+
+def test_verify_cleanup_flag_off_restores_verbatim_acceptance():
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings(llm_cleanup_verify=False)
+    cleaned = "He laid down his pen."
+    text, record = verify_cleanup(31, "He slaid down his pen.", cleaned, settings)
+    assert text == cleaned
+    assert record.get("verify") is False
+
+
+def test_verify_cleanup_mixed_changes_keep_only_the_attributed_one():
+    # A span mixing a genuine junk-token repair with an unattributed verb
+    # substitution reverts as a unit — no partial trust. The refused unit is
+    # recorded; the image-verification pass (#66) can recover such sites.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+    orig = "He said 1x other things."
+    cleaned = "He stated no other things."
+    text, record = verify_cleanup(22, orig, cleaned, settings)
+    assert text == "He said 1x other things."
+    assert record["kept"] == []
+    assert record["reverted"] and record["reverted"][0]["class"] == "replace"
+
+    # A pure junk span repairs cleanly even with neighbors untouched.
+    text, record = verify_cleanup(22, "He said 1x and 2y tokens.", "He said no and 2y tokens.", settings)
+    assert text == "He said no and 2y tokens."
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+
 def test_prep_worker_uses_analyzer(tmp_path):
     from worker.prep.worker import PrepWorker
 

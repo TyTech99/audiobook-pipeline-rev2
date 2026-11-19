@@ -6,6 +6,7 @@ not hardcoded.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -34,6 +35,9 @@ class OcrQualitySettings:
     llm_cleanup_temperature: float = 0.26
     llm_cleanup_max_tokens: int = 4096
     llm_cleanup_system_prompt: str = ""
+    # Verify-and-revert (#65): accept only defect-attributed repairs.
+    # False restores verbatim acceptance of the model output.
+    llm_cleanup_verify: bool = True
 
     @classmethod
     def from_config(cls, config: dict) -> "OcrQualitySettings":
@@ -51,6 +55,7 @@ class OcrQualitySettings:
             llm_cleanup_temperature=float(llm_cleanup.get("temperature", 0.26)),
             llm_cleanup_max_tokens=int(llm_cleanup.get("max_tokens", 4096)),
             llm_cleanup_system_prompt=str(llm_cleanup.get("system_prompt", "")).strip(),
+            llm_cleanup_verify=bool(llm_cleanup.get("verify", True)),
         )
 
 
@@ -141,6 +146,178 @@ def needs_llm_cleanup(ocr_result: dict, settings: OcrQualitySettings) -> bool:
     return not judgment["passed"]
 
 
+def _excerpt(lines: list[str], limit: int = 120) -> str:
+    return " / ".join(lines)[:limit]
+
+
+def _clipped_word_index(orig_line: str) -> int | None:
+    """Index in the line's words of the fragment word of a clipped line, if any.
+
+    The scan-edge clip signature is a lowercase fragment continuing after
+    terminal punctuation mid-line ('fight. ry did not' — 'ry' is the tail of
+    the clipped word).
+    """
+    match = _MID_LINE_LOWER_RESTART_RE.search(orig_line)
+    if not match:
+        return None
+    # The regex has no capture group; the fragment word begins at the
+    # matched lowercase letter (match.end() - 1).
+    return len(orig_line[: match.end() - 1].split())
+
+
+def _repair_class(
+    orig_span: list[str],
+    new_span: list[str],
+    clipped_index: int | None,
+    span_covers: tuple[int, int],
+    line_cleared: bool,
+) -> str | None:
+    """Damage class a replaced span repairs, or None if it is not attributable.
+
+    A change is defect-attributed only when it removes a token with a
+    deterministic damage signature (#65):
+
+    - ``digit_letter`` — the span is pure junk: EVERY original word in it
+      mixes digits and letters and no replacement word does. A span mixing a
+      junk token with an unattributed edit reverts whole — no partial trust.
+    - ``clipped_line`` — the span contains the clipped fragment word and the
+      repaired line clears the clip signature. The opening region of a
+      clipped line was destroyed, so the reconstruction of that region is
+      accepted and logged (the image-verification pass, #66, can later
+      confirm it against the raster).
+
+    Word substitutions with no signature (the period-spelling 'fix' class)
+    return None and revert.
+    """
+    if orig_span and all(_DIGIT_LETTER_TOKEN_RE.fullmatch(w) for w in orig_span) and not any(
+        _DIGIT_LETTER_TOKEN_RE.fullmatch(w) for w in new_span
+    ):
+        return "digit_letter"
+    if (
+        clipped_index is not None
+        and line_cleared
+        and span_covers[0] <= clipped_index < span_covers[1]
+    ):
+        return "clipped_line"
+    return None
+
+
+def _verify_line(orig_line: str, new_line: str, record: dict) -> str:
+    """Filter one changed line to its defect-attributed word changes."""
+    if orig_line == new_line:
+        return orig_line
+    indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
+    orig_words = orig_line.split()
+    new_words = new_line.split()
+    if not orig_words or not new_words:
+        if orig_line != new_line:
+            record["reverted"].append({"class": "whitespace_change", "before": _excerpt([orig_line])})
+        return orig_line
+    clipped_index = _clipped_word_index(orig_line)
+    line_cleared = _MID_LINE_LOWER_RESTART_RE.search(new_line) is None
+    matcher = difflib.SequenceMatcher(None, orig_words, new_words, autojunk=False)
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(orig_words[i1:i2])
+            continue
+        before = " ".join(orig_words[i1:i2])
+        after = " ".join(new_words[j1:j2])
+        if tag == "replace":
+            cls = _repair_class(orig_words[i1:i2], new_words[j1:j2], clipped_index, (i1, i2), line_cleared)
+            if cls:
+                out.extend(new_words[j1:j2])
+                record["kept"].append({"class": cls, "before": _excerpt([before]), "after": _excerpt([after])})
+                continue
+        out.extend(orig_words[i1:i2])
+        record["reverted"].append({"class": tag, "before": _excerpt([before]), "after": _excerpt([after])})
+    return indent + " ".join(out)
+
+
+def verify_cleanup(
+    page_number: int,
+    ocr_text: str,
+    cleaned_text: str,
+    settings: OcrQualitySettings,
+) -> tuple[str, dict]:
+    """Filter an LLM cleanup result down to defect-attributed repairs (#65).
+
+    Default-revert: the cleaned text is accepted only change-by-change, and a
+    change is kept only when it repairs a site with a deterministic damage
+    signature:
+
+    - ``digit_letter`` — the original word mixed digits and letters (a
+      misread token like '10' for 'no') and the replacement clears it;
+    - ``clipped_line`` — the original line carried a lowercase fragment
+      continuing after terminal punctuation mid-line (the scan-edge clip
+      signature) and the repaired line clears that signature.
+
+    Everything else reverts to the OCR text: word substitutions (the
+    period-spelling 'fix' class), inserted or deleted words, whole-line
+    deletions, hyphen edits (hyphenation is owned downstream by
+    ``cleanup.join_hyphen`` with the full-book corpus), line insertions, and
+    leading-space changes (line structure is the paragraph witness — the
+    com-modities rupture class).
+
+    Returns ``(final_text, record)``; ``record`` is the per-page entry for the
+    package's cleanup-log.json. ``llm_cleanup_verify: false`` restores
+    verbatim acceptance.
+    """
+    record: dict = {"page": page_number, "kept": [], "reverted": [], "structural_revert": False}
+    if not settings.llm_cleanup_verify:
+        record["verify"] = False
+        return cleaned_text, record
+    if cleaned_text == ocr_text:
+        return ocr_text, record
+
+    orig_lines = ocr_text.split("\n")
+    new_lines = cleaned_text.split("\n")
+    opcodes = difflib.SequenceMatcher(None, orig_lines, new_lines, autojunk=False).get_opcodes()
+
+    # Structure invariant: the line sequence is the paragraph witness. A line
+    # insertion, a merge/split of unequal length, or an indent-only edit is
+    # never defect-attributed — the whole page reverts.
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "insert":
+            record["structural_revert"] = True
+            record["reverted"].append({"class": "line_inserted", "before": _excerpt(new_lines[j1:j2])})
+            return ocr_text, record
+        if tag == "replace" and i2 - i1 != j2 - j1:
+            record["structural_revert"] = True
+            record["reverted"].append(
+                {
+                    "class": "line_structure_changed",
+                    "before": _excerpt(orig_lines[i1:i2]),
+                    "after": _excerpt(new_lines[j1:j2]),
+                }
+            )
+            return ocr_text, record
+        if tag == "replace" and i2 - i1 == 1 and j2 - j1 == 1:
+            a, b = orig_lines[i1], new_lines[j1]
+            if a != b and a.lstrip() == b.lstrip():
+                record["structural_revert"] = True
+                record["reverted"].append({"class": "indent_changed", "before": _excerpt([a])})
+                return ocr_text, record
+
+    final_lines: list[str] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            final_lines.extend(orig_lines[i1:i2])
+        elif tag == "delete":
+            # Whole-line deletions (header/footer removal) have no damage
+            # signature: keep the line, record the attempted deletion.
+            for line in orig_lines[i1:i2]:
+                record["reverted"].append({"class": "line_deleted", "before": _excerpt([line])})
+            final_lines.extend(orig_lines[i1:i2])
+        else:  # replace, equal counts (enforced above)
+            for k in range(i2 - i1):
+                final_lines.append(_verify_line(orig_lines[i1 + k], new_lines[j1 + k], record))
+
+    if not record["kept"] and not record["reverted"]:
+        return ocr_text, record
+    return "\n".join(final_lines), record
+
+
 # How each gate reason is explained to the cleanup model. A generic
 # 'fix obvious OCR errors' does not engage the model: at 27B the damage
 # passes through unchanged. With the damage CLASS described (verified
@@ -213,14 +390,14 @@ Mean confidence: {quality['confidence']:.1f}%
 Dictionary share: {quality['dict_share']:.1%}
 {repairs_text}
 Rules:
-- Fix obvious OCR errors (misrecognized characters, broken words, hyphenation artifacts)
-- Remove page headers, footers, page numbers, and running titles
-- Fix broken hyphens at line ends (rejoin words split across lines)
-- Preserve the original meaning and wording as much as possible
-- Do NOT add content that isn't in the original
+- Repair ONLY the damaged sites described above. Every other word, spelling,
+  and punctuation must remain EXACTLY as printed, even if it looks unusual —
+  period spellings and proper nouns are the author's; do not modernize them.
+- Do NOT remove or reorder lines; headers, footers, and hyphenation are
+  repaired by later deterministic stages, not here.
 - CRITICAL: preserve each line's leading spaces EXACTLY as given and keep the
   same line breaks — leading spaces encode paragraph indentation. Do not
-  reflow, re-wrap, or merge lines beyond repairing hyphenated words.
+  reflow, re-wrap, or merge lines.
 - Return ONLY the cleaned text, no explanations
 
 OCR text:

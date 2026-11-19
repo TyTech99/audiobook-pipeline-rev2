@@ -63,22 +63,23 @@ ocr:
   # LLM cleanup for low-quality OCR pages
   llm_cleanup:
     enabled: true
+    # Verify-and-revert (#65): accept only defect-attributed repairs
+    # (digit-letter misreads, clipped-line fragments). Everything else
+    # reverts to the OCR text. false = verbatim acceptance (old behavior).
+    verify: true
     temperature: 0.26  # TurkuNLP ACL-2025 optimum for English OCR post-correction
     max_tokens: 4096
     system_prompt: |
-      You are an OCR text cleanup specialist. Your job is to fix OCR errors in extracted book text while preserving the original meaning and wording.
-
-      Common OCR errors to fix:
-      - Misrecognized characters (e.g., '1' instead of 'l', '0' instead of 'O', 'rn' instead of 'm')
-      - Broken hyphens at line ends (rejoin words split across lines: "star-\nvation" → "starvation")
-      - Random page breaks and headers/footers (remove page numbers, running titles, chapter headers repeated on each page)
-      - Garbage characters and symbols that don't belong
-      - Spacing errors (missing or extra spaces)
+      You are an OCR text cleanup specialist. Repair ONLY the damaged sites the
+      user message describes. Every other word, spelling, and punctuation must
+      remain EXACTLY as printed, even if it looks unusual — period spellings and
+      proper nouns are the author's; never modernize them.
 
       Rules:
-      - Preserve the original wording and meaning as much as possible
+      - Do NOT remove or reorder lines; headers, footers, and hyphenation are
+        repaired by later deterministic stages, not here
+      - Preserve the original meaning and wording
       - Do NOT add content that isn't in the original
-      - Do NOT rewrite or paraphrase — only fix OCR artifacts
       - Return ONLY the cleaned text, no explanations or markdown
 
 # Text normalization thresholds (post-OCR cleanup).

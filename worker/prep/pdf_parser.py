@@ -96,6 +96,8 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
         text = page.get_text("text").strip()
         images = page.get_images(full=True)
         ocr_quality = None
+        ocr_result = None
+        cleanup_record = None
 
         # If no text layer and OCR is enabled, try OCR
         if not text and use_ocr:
@@ -124,6 +126,19 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
                                 llm_client, page_num + 1, text, ocr_quality, ocr_settings
                             )
                         )
+                        # Verify-and-revert (#65): accept only defect-attributed
+                        # repairs; every other change returns to the OCR text.
+                        cleaned, cleanup_record = ocr_cleanup.verify_cleanup(
+                            page_num + 1, text, cleaned, ocr_settings
+                        )
+                        if cleanup_record.get("kept"):
+                            logger.info(
+                                "Page %d cleanup verified: %d kept, %d reverted%s",
+                                page_num + 1,
+                                len(cleanup_record["kept"]),
+                                len(cleanup_record["reverted"]),
+                                " (structural revert)" if cleanup_record.get("structural_revert") else "",
+                            )
                         if cleaned != text:
                             text = cleaned
                             llm_cleanup_count += 1
@@ -145,6 +160,8 @@ def parse_pdf(data: bytes, use_ocr: bool = True, ocr_dpi: int = 300, progress_ca
             "text": text,
             "images": len(images),
             "ocr_quality": ocr_quality,
+            "cleanup": cleanup_record,
+            "low_conf_words": (ocr_result or {}).get("low_conf_words", 0),
         }
         pages.append(page_data)
 
