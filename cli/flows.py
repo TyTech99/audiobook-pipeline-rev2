@@ -715,6 +715,11 @@ def _node_task() -> str:
 def _node_unit(prefix: str) -> str:
     return (
         "[Service]\n"
+        # ExecStartPre rebuilds every image; the TTS build alone installs
+        # torch + CUDA wheels and runs minutes past systemd's 90s default,
+        # which kills the start job mid-build (#3). Give real builds room;
+        # cached restarts still return in seconds.
+        "TimeoutStartSec=1800\n"
         f"ExecStartPre=/bin/sh {prefix}/record-hardware.sh\n"
         f"ExecStartPre=docker build -t {SUPERVISOR_IMAGE} -f {prefix}/supervisor.Dockerfile {prefix}\n"
         f"ExecStartPre=/bin/sh {prefix}/build-images.sh\n"

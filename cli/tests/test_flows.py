@@ -401,6 +401,7 @@ def test_windows_node_task_and_prep_without_gpu():
     assert prep.packages == ["docker-ce"]
     node_unit = prep.units["audiobook-supervisor.service"]
     assert "/var/run/docker.sock" in node_unit
+    assert "TimeoutStartSec=1800" in node_unit
     assert "venv" not in node_unit
     assert "--gpus" not in node_unit
     assert "python3" not in prep.packages
