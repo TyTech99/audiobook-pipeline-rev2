@@ -200,8 +200,110 @@ def test_build_epub():
         assert "META-INF/container.xml" in names
         assert "OEBPS/content.opf" in names
         assert "OEBPS/nav.xhtml" in names
+        assert "OEBPS/toc.ncx" in names
         assert "OEBPS/chapter-1.xhtml" in names
         assert zf.read("mimetype") == b"application/epub+zip"
+        # NCX: EPUB 2 toc for Kindle compat, one navPoint per chapter.
+        ncx = zf.read("OEBPS/toc.ncx").decode()
+        assert '<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/"' in ncx
+        assert ncx.count("<navPoint ") == 1
+        assert "chapter-1.xhtml" in ncx
+        # OPF: ncx manifest item + spine toc ref + dcterms:modified.
+        opf = zf.read("OEBPS/content.opf").decode()
+        assert 'id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"' in opf
+        assert '<spine toc="ncx">' in opf
+        assert "dcterms:modified" in opf
+        # Chapter content must declare the epub: prefix it uses.
+        chapter = zf.read("OEBPS/chapter-1.xhtml").decode()
+        assert 'xmlns:epub="http://www.idpf.org/2007/ops"' in chapter
+
+
+def test_build_epub_embeds_cover():
+    pages = [{"page": 1, "text": "Body text.", "images": 0}]
+    chapters = [
+        {"number": 1, "title": "Chapter 1", "section": "chapter-1", "start_page": 1, "end_page": 1, "pages": [1]},
+    ]
+    cover = b"\xff\xd8\xff\xe0FAKEJPEGDATA"
+    data = build_epub("Test Book", "Test Author", "en", pages, chapters, cover=cover)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        assert "OEBPS/cover.jpg" in names
+        assert "OEBPS/cover.xhtml" in names
+        assert zf.read("OEBPS/cover.jpg") == cover
+        opf = zf.read("OEBPS/content.opf").decode()
+        assert 'id="cover-image" href="cover.jpg" media-type="image/jpeg" properties="cover-image"' in opf
+        assert '<meta name="cover" content="cover-image"/>' in opf
+        # Cover is the first spine entry.
+        spine_start = opf.index("<spine")
+        assert opf.index('idref="cover"', spine_start) < opf.index('idref="ch-1"', spine_start)
+
+
+def test_build_epub_without_cover_has_no_cover_items():
+    data = build_epub(
+        "Test Book", "Test Author", "en",
+        [{"page": 1, "text": "Body text.", "images": 0}],
+        [{"number": 1, "title": "Chapter 1", "section": "chapter-1", "start_page": 1, "end_page": 1, "pages": [1]}],
+    )
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = zf.namelist()
+        assert "OEBPS/cover.jpg" not in names
+        opf = zf.read("OEBPS/content.opf").decode()
+        assert "cover-image" not in opf
+
+
+def test_analyze_chapters_summarizes_and_skips_stubs():
+    from worker.prep.llm.analyzer import LLMAnalyzer
+    from worker.common.llm_client import LLMClient, LLMSettings
+
+    calls = []
+
+    class FakeClient(LLMClient):
+        def __init__(self):
+            super().__init__(LLMSettings(base_url="http://x/v1", api_key="k", model="m"))
+
+        def chat_json(self, *, system, user, temperature=None, max_tokens=None):
+            calls.append(user)
+            assert system.startswith("You analyze one chapter")
+            return {"summary": "A summary of the chapter.", "tone_note": "measured, elegiac"}
+
+    pages = [{"page": 1, "text": "word " * 200}]  # >500 chars: worth summarizing
+    stub_pages = [{"page": 2, "text": "Only a title."}]  # frontmatter stub
+    chapters = [
+        {"section": "chapter-1", "title": "The Pound of Flesh", "start_page": 1, "pages": [1]},
+        {"section": "frontmatter-dedication", "title": "Dedication", "start_page": 2, "pages": [2]},
+    ]
+    analyzer = LLMAnalyzer(FakeClient(), required=False)
+    results = analyzer.analyze_chapters(
+        title="Unfinished Victory", author="Arthur Bryant", language="en",
+        pages=pages + stub_pages, chapters=chapters,
+    )
+    # The dedication stub was skipped; the real chapter was summarized.
+    assert len(calls) == 1
+    assert len(results) == 1
+    assert results[0]["section"] == "chapter-1"
+    assert results[0]["title"] == "The Pound of Flesh"
+    assert results[0]["summary"] == "A summary of the chapter."
+    assert results[0]["tone_note"] == "measured, elegiac"
+    assert "The Pound of Flesh" in calls[0]
+
+
+def test_analyze_chapters_never_raises_on_client_error():
+    from worker.prep.llm.analyzer import LLMAnalyzer
+    from worker.common.llm_client import LLMClient, LLMSettings
+
+    class BrokenClient(LLMClient):
+        def __init__(self):
+            super().__init__(LLMSettings(base_url="http://x/v1", api_key="k", model="m"))
+
+        def chat_json(self, *, system, user, temperature=None, max_tokens=None):
+            raise RuntimeError("LLM down")
+
+    pages = [{"page": 1, "text": "word " * 200}]
+    chapters = [{"section": "chapter-1", "title": "Ch 1", "start_page": 1, "pages": [1]}]
+    analyzer = LLMAnalyzer(BrokenClient(), required=False)
+    assert analyzer.analyze_chapters(
+        title="T", author="A", language="en", pages=pages, chapters=chapters,
+    ) == []
 
 
 def test_parse_epub():
@@ -389,6 +491,9 @@ def test_prep_worker_uses_analyzer(tmp_path):
                 ],
                 "suggested_voice_recipes": [],
             }
+
+        def analyze_chapters(self, **kwargs):
+            return []
 
     class FakeRedis:
         def blmove(self, src, dst, timeout=30, src_end=None, dst_end=None):

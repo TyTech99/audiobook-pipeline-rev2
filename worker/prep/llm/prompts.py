@@ -38,3 +38,30 @@ def build_user_prompt(
         f"Known voice recipes (prefer these ids when suggesting): {recipe_line}\n\n"
         f"Book sample text:\n{sample}\n"
     )
+
+
+CHAPTER_SYSTEM_PROMPT = """You analyze one chapter of a book for an audiobook production pipeline.
+Return a single JSON object with exactly these keys:
+- summary: string, 2-3 sentences summarizing what this chapter covers
+- tone_note: string, one line describing the pacing and emotional register
+  for the narrator (e.g. "measured and elegiac, with irony in the last third")
+
+Do not include markdown. Do not include keys outside that schema."""
+
+
+def build_chapter_prompt(
+    *,
+    book_title: str,
+    chapter_title: str,
+    language: str,
+    sample_text: str,
+) -> str:
+    sample = sample_text.strip()
+    if len(sample) > 8000:
+        sample = sample[:8000] + "\n…[truncated]"
+    return (
+        f"Book: {book_title}\n"
+        f"Chapter: {chapter_title}\n"
+        f"Language: {language}\n\n"
+        f"Chapter text:\n{sample}\n"
+    )

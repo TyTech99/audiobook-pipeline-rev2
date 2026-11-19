@@ -340,10 +340,35 @@ class PrepWorker:
             raise ValueError(f"Script validation failed: {script_errors}")
         self.report_progress(job_id, {"stage": "script", "percent": 85, "total_segments": script["metadata"]["total_segments"]})
 
+        logger.info("Analyzing book...")
+        self.report_progress(job_id, {"stage": "analysis", "percent": 80})
+        llm_analysis = self.analyzer.analyze(
+            title=title,
+            author=author,
+            language=language,
+            pages=doc["pages"],
+        )
+        # Per-chapter summaries + tone notes: optional enrichment (#15).
+        # A failed or missing analyzer must never fail the job.
+        chapter_analysis: list[dict] = []
+        if hasattr(self.analyzer, "analyze_chapters"):
+            try:
+                chapter_analysis = self.analyzer.analyze_chapters(
+                    title=title,
+                    author=author,
+                    language=language,
+                    pages=doc["pages"],
+                    chapters=chapters,
+                )
+                logger.info("Chapter analysis: %d summaries", len(chapter_analysis))
+            except Exception as e:
+                logger.warning("Chapter analysis failed: %s", e)
+        llm_analysis["chapters"] = chapter_analysis
+
         logger.info("Building EPUB...")
         self.check_cancelled(job_id)
         self.report_progress(job_id, {"stage": "epub", "percent": 90})
-        epub_data = build_epub(title, author, language, doc["pages"], chapters)
+        epub_data = build_epub(title, author, language, doc["pages"], chapters, cover=cover_bytes)
 
         package = {
             "manifest": {
@@ -372,12 +397,7 @@ class PrepWorker:
             "page_ledger": ledger,
             "metadata": metadata,
             "cover": cover_bytes,
-            "llm_analysis": self.analyzer.analyze(
-                title=title,
-                author=author,
-                language=language,
-                pages=doc["pages"],
-            ),
+            "llm_analysis": llm_analysis,
         }
 
         root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
