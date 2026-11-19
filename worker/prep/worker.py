@@ -287,7 +287,12 @@ class PrepWorker:
         logger.info("Detecting chapters...")
         self.check_cancelled(job_id)
         # On raw text: the normalized pages carry paragraphs, not lines.
-        chapters = detect_chapters(raw_pages)
+        # classify_frontmatter runs ONCE per job and feeds both chapter
+        # detection and the page ledger (issue #42).
+        from worker.prep.frontmatter import classify_frontmatter
+
+        fm_sections = classify_frontmatter(raw_pages)
+        chapters = detect_chapters(raw_pages, fm_sections)
         logger.info("Detected %d chapters", len(chapters))
         self.report_progress(job_id, {"stage": "chapters", "percent": 50, "total_chapters": len(chapters)})
         metadata = doc["metadata"]
@@ -318,8 +323,9 @@ class PrepWorker:
         self.report_progress(job_id, {"stage": "ledger", "percent": 65})
         # The ledger is built from raw pages: frontmatter classification reads
         # line structure (title-page words, contents entries), and the
-        # normalized pages only carry paragraphs.
-        ledger = build_page_ledger(input_format, input_url, raw_pages, chapters)
+        # normalized pages only carry paragraphs. fm_sections was computed
+        # once above and is reused (issue #42).
+        ledger = build_page_ledger(input_format, input_url, raw_pages, chapters, fm_sections)
         ledger_errors = validate_page_ledger(ledger, doc["total_pages"])
         if ledger_errors:
             raise ValueError(f"Page ledger validation failed: {ledger_errors}")

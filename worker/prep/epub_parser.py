@@ -134,26 +134,14 @@ def _extract_text(root: ET.Element) -> str:
 
 
 def classify_epub_item(page: dict) -> tuple[str, str]:
-    """Classify a single EPUB item. Returns (action, reason)."""
-    text = page["text"]
-    if not text or len(text) < 10:
-        if page["images"] > 0:
-            return "skipped", "illustration only"
-        return "skipped", "blank"
+    """Classify a single EPUB item. Returns (action, reason).
 
-    lower = text.lower()
-    if re.search(r"copyright|all rights reserved|isbn", lower):
-        return "kept", "copyright"
-    # Frontmatter headings sit at the top of the item; a mid-item line
-    # ("For events outstripped me.") must not reclassify the item. Only a
-    # literal DEDICATION heading counts (same rule as classify_page).
-    top = "\n".join(text.split("\n")[:6])
-    if re.search(r"^\s*(table of contents|contents)\s*$", top, re.MULTILINE):
-        return "kept", "table of contents"
-    if re.search(r"^\s*dedication\b", top.lower(), re.MULTILINE):
-        return "kept", "dedication"
+    Thin wrapper over page_types.classify_text_page — the canonical
+    classifier shared with the PDF path (issue #42). Before the
+    consolidation this twin had silently drifted from classify_page
+    (missing the acknowledgments and backmatter rules, and the
+    'For <word>' dedication bug fixed twice).
+    """
+    from worker.prep.page_types import classify_text_page
 
-    if re.match(r"^\s*(chapter|part|book|prologue|epilogue|preface|foreword|introduction)\s+\d+", lower):
-        return "kept", "chapter heading"
-
-    return "kept", "body text"
+    return classify_text_page(page["text"], page.get("images", 0))

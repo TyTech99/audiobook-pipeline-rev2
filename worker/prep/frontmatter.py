@@ -5,16 +5,21 @@ Uses position + content + density heuristics to classify pages as:
 - frontmatter-copyright: legal/copyright information
 - frontmatter-toc: table of contents
 - frontmatter-dedication: dedication page
-- frontmatter-preface: author's preface (narratable)
-- frontmatter-foreword: foreword by another author (narratable)
-- frontmatter-introduction: introduction (narratable)
-- frontmatter-acknowledgments: author's acknowledgments
+- frontmatter-epigraph: a quote with an ALL-CAPS attribution
 - backmatter-index: index pages
 - backmatter-bibliography: references/bibliography
 - backmatter-glossary: glossary
 - backmatter-about-author: about the author
 - backmatter-publisher-ad: advertising content
 - backmatter-colophon: production information
+
+Preface/foreword/introduction pages are NOT labeled here: structure.py's
+unnumbered-section detection owns them (a section spans the whole
+preface, not just its heading page).
+
+Keyword tables shared with other files live in page_types.py (issue #42);
+the heuristics below (thresholds, position guards) are this module's
+own logic.
 
 Pages not matching any of these are left as "unassigned" for the
 structure detector to handle (chapters, etc.).
@@ -24,8 +29,12 @@ from __future__ import annotations
 
 import re
 
+from worker.prep.page_types import BACKMATTER_LABEL_RES as BACKMATTER_RE
 
-# Keywords that indicate a copyright page
+
+# Keywords that indicate a copyright PAGE (deliberately broader than
+# page_types.COPYRIGHT_KEYWORDS_RE, which only tags a page reason):
+# includes 'printed in' and publisher lines found on legal pages.
 COPYRIGHT_RE = re.compile(
     r"copyright|all rights reserved|isbn|printed in|published\s+by\s+\w|publisher's?",
     re.IGNORECASE,
@@ -45,43 +54,6 @@ DEDICATION_RE = re.compile(
     r"^\s*(for\s+\w+|to\s+\w+|dedicated\s+to|in\s+memory\s+of|in\s+honor\s+of)",
     re.IGNORECASE,
 )
-
-# Keywords that indicate a preface
-PREFACE_RE = re.compile(
-    r"^\s*(preface|author's?\s+note|author's?\s+foreword)\s*$",
-    re.IGNORECASE,
-)
-
-# Keywords that indicate a foreword
-FOREWORD_RE = re.compile(
-    r"^\s*foreword\s*$",
-    re.IGNORECASE,
-)
-
-# Keywords that indicate an introduction
-INTRODUCTION_RE = re.compile(
-    r"^\s*(introduction|introductory\s+note|note\s+to\s+the\s+reader)\s*$",
-    re.IGNORECASE,
-)
-
-# Keywords that indicate acknowledgments
-ACKNOWLEDGMENTS_RE = re.compile(
-    r"^\s*(acknowledgments?|acknowledgements?)\s*$",
-    re.IGNORECASE,
-)
-
-# Keywords that indicate backmatter sections
-BACKMATTER_RE = {
-    "backmatter-index": re.compile(r"^\s*(index|general\s+index|subject\s+index|name\s+index)\s*$", re.IGNORECASE),
-    "backmatter-bibliography": re.compile(r"^\s*(bibliography|references|works\s+cited|further\s+reading)\s*$", re.IGNORECASE),
-    "backmatter-glossary": re.compile(r"^\s*glossary\s*$", re.IGNORECASE),
-    "backmatter-about-author": re.compile(r"^\s*(about\s+the\s+author|about\s+the\s+narrator)\s*$", re.IGNORECASE),
-    "backmatter-colophon": re.compile(r"^\s*colophon\s*$", re.IGNORECASE),
-    "backmatter-publisher-ad": re.compile(
-        r"^\s*(also\s+by|other\s+books|publishers?'\s*announcements?|advertisements?)\s*$",
-        re.IGNORECASE,
-    ),
-}
 
 # Maximum number of lines on a title page (title + author + maybe publisher)
 TITLE_PAGE_MAX_LINES = 8
@@ -321,16 +293,15 @@ def classify_frontmatter(pages: list[dict]) -> dict[int, str]:
 
 def get_frontmatter_reason(section: str) -> str:
     """Get a human-readable reason for a frontmatter/backmatter section."""
+    # Preface/foreword/introduction are not page labels anymore
+    # (structure.py's unnumbered sections own them), so they have no
+    # entries here.
     reasons = {
         "frontmatter-title": "title page",
         "frontmatter-copyright": "copyright",
         "frontmatter-toc": "table of contents",
         "frontmatter-dedication": "dedication",
         "frontmatter-epigraph": "epigraph",
-        "frontmatter-preface": "preface",
-        "frontmatter-foreword": "foreword",
-        "frontmatter-introduction": "introduction",
-        "frontmatter-acknowledgments": "acknowledgments",
         "backmatter-index": "index",
         "backmatter-bibliography": "bibliography",
         "backmatter-glossary": "glossary",

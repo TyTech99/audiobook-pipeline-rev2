@@ -12,12 +12,20 @@ def build_page_ledger(
     source_file: str,
     pages: list[dict],
     chapters: list[dict],
+    fm_sections: dict[int, str] | None = None,
 ) -> dict:
-    """Build a page ledger from parsed pages and detected chapters."""
+    """Build a page ledger from parsed pages and detected chapters.
+
+    fm_sections: precomputed frontmatter classification (from
+    frontmatter.classify_frontmatter); computed here when omitted. Pass
+    it in when the caller already ran classify_frontmatter for chapter
+    detection, so the job computes it once (issue #42).
+    """
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     # Classify frontmatter/backmatter pages
-    fm_sections = fm.classify_frontmatter(pages)
+    if fm_sections is None:
+        fm_sections = fm.classify_frontmatter(pages)
 
     if source_format == "pdf":
         entries = []
