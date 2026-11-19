@@ -288,6 +288,49 @@ def test_update_node_reports_a_unit_restart_failure(monkeypatch, tmp_path):
     assert host.read(linux_paths()["node_prefix"] + "/REVISION") == before_revision
 
 
+def test_update_node_retries_the_container_inspect(monkeypatch, tmp_path):
+    host = MemoryHost(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    state = {"inspects": 0}
+
+    def run(argv):
+        if "inspect" in argv and argv[1] == "inspect":
+            state["inspects"] += 1
+            if state["inspects"] == 1:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+            return subprocess.CompletedProcess(argv, 0, stdout="sha256:" + "a" * 64 + "\n", stderr="")
+        if "inspect" in argv and argv[1] == "image":
+            return subprocess.CompletedProcess(argv, 0, stdout="a" * 64 + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flows, "_run", run)
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", [])
+    assert result["code"] == EXIT_OK
+    assert state["inspects"] >= 2
+    assert host.read(linux_paths()["node_prefix"] + "/REVISION") == "rev" + "a" * 40
+
+
+def test_update_node_fails_when_the_container_never_appears(monkeypatch, tmp_path):
+    host = MemoryHost(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    monkeypatch.setattr(flows, "_VERIFY_WAIT_SECONDS", 0.0)
+
+    def run(argv):
+        if "inspect" in argv and argv[1] == "inspect":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+        if "inspect" in argv and argv[1] == "image":
+            return subprocess.CompletedProcess(argv, 0, stdout="a" * 64 + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flows, "_run", run)
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", messages)
+    assert result["code"] == EXIT_FAILED
+    assert any("missing after restart" in line for line in messages)
+
+
 def test_update_refuses_windows_non_root_bad_source_and_uninstalled(tmp_path):
     source = str(_update_source_tree(tmp_path))
     windows = MemoryHost(os_name="windows")

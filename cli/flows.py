@@ -19,6 +19,12 @@ EXIT_REBOOT = 4
 
 SUPERVISOR_IMAGE = "audiobook-supervisor:local"
 
+# Seconds to wait for the recreated supervisor container to appear in
+# `docker inspect` before declaring the deploy failed. systemctl returns as
+# the unit's docker run forks, so the container registration can lag the
+# restart call by a moment (observed live on ubuDual5060).
+_VERIFY_WAIT_SECONDS = 15.0
+
 
 def _git_revision(cwd: Path) -> str:
     """Return the git commit hash at cwd, or 'unknown' if unavailable."""
@@ -436,7 +442,13 @@ def _update_node(host, root: Path, revision: str, messages: list[str]) -> dict:
     except Exception as exc:  # noqa: BLE001 - a failed systemctl restart is a deploy failure
         messages.append(f"supervisor unit restart failed: {exc}")
         return {"code": EXIT_FAILED, "changed": True}
+    # systemctl returns as the new container is being created; docker inspect
+    # can miss it for a moment. Bounded retry before declaring failure.
+    deadline = time.monotonic() + _VERIFY_WAIT_SECONDS
     container = _run(["docker", "inspect", "audiobook-supervisor", "--format", "{{.Image}}"])
+    while container.returncode != 0 and time.monotonic() < deadline:
+        time.sleep(1)
+        container = _run(["docker", "inspect", "audiobook-supervisor", "--format", "{{.Image}}"])
     built = _run(["docker", "image", "inspect", SUPERVISOR_IMAGE, "--format", "{{.Id}}"])
     if container.returncode != 0 or built.returncode != 0:
         messages.append("supervisor container or image is missing after restart")
