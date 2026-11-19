@@ -198,39 +198,17 @@ def pages_to_units(pages: list[dict]) -> list[dict]:
 
 
 def classify_page(page: dict) -> tuple[str, str]:
-    """Classify a single page. Returns (action, reason)."""
-    text = page["text"]
-    if not text or len(text) < 10:
-        if page["images"] > 0:
-            return "skipped", "illustration only"
-        return "skipped", "blank"
+    """Classify a single page. Returns (action, reason).
 
-    lower = text.lower()
-    if re.search(r"copyright|all rights reserved|isbn", lower):
-        return "kept", "copyright"
-    # Frontmatter headings sit at the top of the page; a mid-page line
-    # ("For events outstripped me.") must not reclassify the page.
-    top = "\n".join(text.split("\n")[:6])
-    top_lower = top.lower()
-    if re.search(r"^\s*(table of contents|contents)\s*$", top, re.MULTILINE):
-        return "kept", "table of contents"
-    # Only a literal DEDICATION heading here: 'For <word>' matches ordinary
-    # sentence openings ('For events outstripped me.') at the top of body
-    # pages. True dedication pages are labeled by frontmatter.classify_frontmatter.
-    if re.search(r"^\s*dedication\b", top_lower, re.MULTILINE):
-        return "kept", "dedication"
-    if re.search(r"^\s*(acknowledgments?|acknowledgements?)\s*$", top_lower, re.MULTILINE):
-        return "kept", "acknowledgments"
-    if re.search(r"^\s*(index|bibliography|references|glossary)\s*$", top_lower, re.MULTILINE):
-        return "kept", "backmatter"
+    Thin wrapper over page_types.classify_text_page — the canonical
+    classifier shared with the EPUB path (issue #42).
+    """
+    from worker.prep.page_types import classify_text_page
 
-    if re.match(r"^\s*(chapter|part|book|prologue|epilogue|preface|foreword|introduction)\s+\d+", lower):
-        return "kept", "chapter heading"
-
-    return "kept", "body text"
+    return classify_text_page(page["text"], page.get("images", 0))
 
 
-def detect_chapters(pages: list[dict]) -> list[dict]:
+def detect_chapters(pages: list[dict], fm_sections: dict[int, str] | None = None) -> list[dict]:
     """Detect chapter boundaries using the old pipeline's structure detection.
 
     Pages classified as a printed table of contents are excluded from the
@@ -240,11 +218,16 @@ def detect_chapters(pages: list[dict]) -> list[dict]:
 
     Falls back to the naive regex if the old pipeline's detection fails
     (e.g., no units available).
+
+    fm_sections: precomputed frontmatter classification (from
+    frontmatter.classify_frontmatter); computed here when omitted. Pass
+    it in when the caller already ran classify_frontmatter for the page
+    ledger, so the job computes it once (issue #42).
     """
     from worker.prep import frontmatter as fm
     from worker.prep import structure
 
-    fm_map = fm.classify_frontmatter(pages)
+    fm_map = fm_sections if fm_sections is not None else fm.classify_frontmatter(pages)
     scan_pages = [p for p in pages if fm_map.get(p["page"]) != "frontmatter-toc"]
 
     units = pages_to_units(scan_pages)
@@ -290,12 +273,11 @@ def detect_chapters(pages: list[dict]) -> list[dict]:
 
 def _detect_chapters_naive(pages: list[dict]) -> list[dict]:
     """Naive chapter detection (original implementation)."""
+    from worker.prep.page_types import NUMBERED_HEADING_LINE_RE
+
     chapters = []
     current_chapter = None
-    chapter_re = re.compile(
-        r"^\s*(chapter|part|book|prologue|epilogue|preface|foreword|introduction)\s+(\d+|[ivxlcdm]+)\.?\s*(.*)$",
-        re.IGNORECASE,
-    )
+    chapter_re = NUMBERED_HEADING_LINE_RE
 
     for page in pages:
         text = page["text"].strip()

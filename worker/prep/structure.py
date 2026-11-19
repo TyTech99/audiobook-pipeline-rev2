@@ -4,6 +4,9 @@ import re
 
 from worker.prep import pageparts
 from worker.prep.bookio_old import title_case as _title_case
+# Backmatter exclusion keywords are defined once in page_types.py next to
+# the label table (issue #42); this is the "narration stops here" table.
+from worker.prep.page_types import BACKMATTER_EXCLUSION_RE as BACK_MATTER_RE
 
 WORDS = "ONE TWO THREE FOUR FIVE SIX SEVEN EIGHT NINE TEN ELEVEN TWELVE THIRTEEN FOURTEEN FIFTEEN SIXTEEN SEVENTEEN EIGHTEEN NINETEEN TWENTY".split()
 ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
@@ -20,9 +23,6 @@ ORDINAL_LESSON_RE = re.compile(r"^\s*(The|THE)\s+([A-Z][a-z]+|[A-Z]+)\s+(Lesson|
 NUMBERED_LESSON_RE = re.compile(r"^\s*(Lesson|LESSON)\s+(?:(?:Number|NUMBER|No\.?|NO\.?)\s*)?([IVXLC]+|\d{1,3}|[A-Z][a-z]+|[A-Z]+)\s*[.:]?\s*$")
 # A contents line for a lesson: the heading, dot leaders, then the title.
 TOC_LESSON_RE = re.compile(r"^\s*(.*?\b(?:Lesson|LESSON)\b(?:\s+\S+)?\.?)\s*(?:[.\u2026]\s*){3,}(\S.*?)\s*$")
-# A page that opens with one of these (alone on its line) after the last chapter has started is back matter, not chapter text.
-BACK_MATTER_RE = re.compile(r"^\s*(bibliography|index|general index|colophon|advertisements?|publishers?\W{0,2} announcements?"
-                            r"|(?:other )?books by the same author|also by [A-Za-z .]{2,40}|other books by [A-Za-z .]{2,40})\s*[.:]?\s*$", re.I)
 
 # Unnumbered section headings: Introduction, Preface, Part I, Prologue, Epilogue, etc.
 # These are standalone lines (not merged with body text) that mark section boundaries.

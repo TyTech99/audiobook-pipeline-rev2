@@ -711,3 +711,85 @@ def test_detect_chapters_unnumbered_section_slug():
     assert chapters[0]["label"] == "Introduction"
     assert chapters[0]["title"] == "Historian\u2019s Testament"
     assert chapters[0]["pages"] == [1, 2]
+
+
+def test_pdf_and_epub_classifiers_agree():
+    # Issue #42: classify_page and classify_epub_item are wrappers over
+    # one classifier. Every input must classify identically on both
+    # paths — including the cases where the old twins had drifted
+    # (acknowledgments and backmatter rules existed only on the PDF side).
+    from worker.prep.epub_parser import classify_epub_item
+    from worker.prep.pdf_parser import classify_page
+
+    cases = [
+        # (text, images)
+        ("", 3),                                   # illustration only
+        ("", 0),                                   # blank
+        ("Copyright 2026 by A. Author. All rights reserved.", 0),
+        ("CONTENTS\n\nCHAPTER 1 ......... 9\nCHAPTER 2 ......... 20", 0),  # case-insensitive heading
+        ("DEDICATION\n\nFor my wife, who understood", 0),
+        ("Body text. For events outstripped me. And more words here to fill it out.", 0),  # mid-page 'For ...'
+        ("ACKNOWLEDGMENTS\n\nThanks to everyone who helped with this book over the years.", 0),
+        ("INDEX\n\nSmith, John ......... 1\nAdventure, The .... 5", 0),
+        ("Chapter 1\n\nThis is the first chapter with plenty of body text to read.", 0),
+        ("This is plain body text of an ordinary chapter, long enough to classify.", 0),
+    ]
+    for text, images in cases:
+        page = {"page": 1, "text": text, "images": images}
+        item = {"page": 1, "item": "x.xhtml", "text": text, "images": images, "media_type": "application/xhtml+xml"}
+        assert classify_page(page) == classify_epub_item(item), (
+            f"classifiers disagree on {text[:40]!r}: {classify_page(page)} vs {classify_epub_item(item)}"
+        )
+
+
+def test_classification_keyword_tables_defined_once():
+    # Issue #42 guard: the keyword tables must come from page_types, not
+    # be re-declared in the consuming files.
+    import worker.prep.epub_parser as epub_parser
+    import worker.prep.frontmatter as fm_mod
+    import worker.prep.page_types as page_types
+    import worker.prep.pdf_parser as pdf_parser
+    import worker.prep.structure as structure_mod
+
+    # No classifier body left in the wrappers (no 'body text' returns inline)
+    src_pdf = open(pdf_parser.__file__).read()
+    src_epub = open(epub_parser.__file__).read()
+    assert 'return "kept", "body text"' not in src_pdf.split("def classify_page")[1].split("def ")[0]
+    assert 'return "kept", "body text"' not in src_epub.split("def classify_epub_item")[1].split("def ")[0]
+    # Backmatter tables are the page_types objects, not copies
+    assert structure_mod.BACK_MATTER_RE is page_types.BACKMATTER_EXCLUSION_RE
+    assert fm_mod.BACKMATTER_RE is page_types.BACKMATTER_LABEL_RES
+
+
+def test_build_page_ledger_uses_passed_fm_sections():
+    # fm_sections passed in must be used verbatim, not recomputed.
+    from worker.prep.page_ledger import build_page_ledger
+
+    pages = [
+        # Text that would NOT classify as frontmatter on its own
+        {"page": 1, "text": "Just some plain body text here, long enough to count as text.", "action": "kept", "reason": "body text"},
+        {"page": 2, "text": "More plain body text here, also long enough to count.", "action": "kept", "reason": "body text"},
+    ]
+    chapters = [
+        {"number": 1, "title": "Chapter 1", "section": "chapter-1", "start_page": 1, "end_page": 2, "pages": [1, 2]},
+    ]
+    fm_sections = {1: "frontmatter-title"}  # externally supplied
+    ledger = build_page_ledger("pdf", "test.pdf", pages, chapters, fm_sections=fm_sections)
+    assert ledger["pages"][0]["section"] == "frontmatter-title"
+    assert ledger["pages"][0]["reason"] == "title page"
+    assert ledger["pages"][1]["section"] == "chapter-1"
+
+
+def test_detect_chapters_uses_passed_fm_sections():
+    # A page marked as TOC via passed-in fm_sections must be excluded
+    # from the heading scan even when its text lacks TOC heuristics.
+    from worker.prep.pdf_parser import detect_chapters
+
+    pages = [
+        {"page": 1, "text": "CHAPTER 1\n\nTHE TREATY\n\nBody text of the first chapter follows here.", "images": 0},
+        {"page": 2, "text": "CHAPTER 1\n\nTHE REAL ONE\n\nBody text that goes on and on here for a while.", "images": 0},
+    ]
+    fm_sections = {1: "frontmatter-toc"}
+    chapters = detect_chapters(pages, fm_sections=fm_sections)
+    assert len(chapters) == 1
+    assert chapters[0]["start_page"] == 2
