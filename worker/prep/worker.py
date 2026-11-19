@@ -206,6 +206,8 @@ class PrepWorker:
         self.report_progress(job_id, {"stage": "parsing", "percent": 5})
 
         cleanup_records: list[dict] = []
+        declared_sites: list[dict] = []
+        ocr_quality_pages: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -237,8 +239,23 @@ class PrepWorker:
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.check_cancelled(job_id)
-            # Cleanup verify records flow into the package logs (#65).
+            # Cleanup verify records flow into the package logs (#65);
+            # declared word sites (#68) and per-page quality verdicts too.
             cleanup_records = [p["cleanup"] for p in doc["pages"] if p.get("cleanup")]
+            declared_sites = [s for p in doc["pages"] for s in (p.get("declared_words") or [])]
+            ocr_quality_pages = [
+                {
+                    "page": p["page"],
+                    "confidence": (p.get("ocr_quality") or {}).get("confidence"),
+                    "dict_share": (p.get("ocr_quality") or {}).get("dict_share"),
+                    "reasons": (p.get("ocr_quality") or {}).get("reasons", []),
+                    "passed": (p.get("ocr_quality") or {}).get("passed"),
+                    "cleaned": bool(p.get("cleanup")),
+                    "declared_words": len(p.get("declared_words") or []),
+                }
+                for p in doc["pages"]
+                if p.get("ocr_quality")
+            ]
             # Extract metadata early (needed for normalization header detection)
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
@@ -393,14 +410,21 @@ class PrepWorker:
             "changes_reverted": len(reverted_changes),
             "structural_reverts": sum(1 for r in cleanup_records if r.get("structural_revert")),
             "low_conf_word_sites": sum(p.get("low_conf_words", 0) for p in doc["pages"]),
+            # Declared unknowns (#68): non-dictionary words in the shipped
+            # text — damage the signals cannot see AND the author's own
+            # rare words, both counted, never silently shipped.
+            "declared_word_sites": len(declared_sites),
+            "declared_words_sample": declared_sites[:20],
             "unattributed_changes": 0,
         }
         logger.info(
-            "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d unattributed=0",
+            "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d "
+            "declared_words=%d unattributed=0",
             fidelity["changes_kept"],
             fidelity["changes_reverted"],
             fidelity["structural_reverts"],
             fidelity["low_conf_word_sites"],
+            fidelity["declared_word_sites"],
         )
 
         package = {
@@ -422,6 +446,7 @@ class PrepWorker:
                         "changes_kept": fidelity["changes_kept"],
                         "changes_reverted": fidelity["changes_reverted"],
                         "low_conf_word_sites": fidelity["low_conf_word_sites"],
+                        "declared_word_sites": fidelity["declared_word_sites"],
                         "unattributed_changes": fidelity["unattributed_changes"],
                     },
                 },
@@ -439,6 +464,7 @@ class PrepWorker:
             "llm_analysis": llm_analysis,
             "cleanup_log": cleanup_records,
             "fidelity": fidelity,
+            "ocr_quality_pages": ocr_quality_pages,
         }
 
         root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
@@ -453,6 +479,7 @@ class PrepWorker:
                 "llm-analysis.json": json.dumps(package["llm_analysis"]),
                 "cleanup-log.json": json.dumps(package["cleanup_log"]),
                 "fidelity-report.json": json.dumps(package["fidelity"]),
+                "ocr-quality.json": json.dumps(package["ocr_quality_pages"]),
                 "manifest.json": json.dumps(package["manifest"]),
                 "cover.jpg": package["cover"],
             },

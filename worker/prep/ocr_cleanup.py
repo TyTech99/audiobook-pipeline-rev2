@@ -330,6 +330,44 @@ def verify_cleanup(
     return "\n".join(final_lines), record
 
 
+def declare_page_words(page_number: int, text: str, language: str = "eng") -> list[dict]:
+    """Non-dictionary words on a page — declared unknowns (#68).
+
+    Declaration, never repair: a non-dictionary word is either damage the
+    signals cannot see ('almos' for 'almost' — a page-gate-blind, confident
+    misread) or the author's own word (a period spelling, a proper noun).
+    The fidelity report counts them and the image-verification pass (#66)
+    adjudicates; nothing ships silently undeclared.
+
+    Tokenization is dicts.py's (words of two letters or more) — the same
+    measure the dict-share gate uses, one definition. Missing word list:
+    warn once per call and declare nothing — same graceful degradation as
+    the dict-share check.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("word-level declaration unavailable: %s", e)
+        return []
+    lowered = text.lower()
+    counts: dict[str, int] = {}
+    first_pos: dict[str, int] = {}
+    for token in dicts.counted(text):
+        if token in dictionary or token.split("'")[0] in dictionary:
+            continue
+        counts[token] = counts.get(token, 0) + 1
+        if token not in first_pos:
+            first_pos[token] = lowered.find(token)
+    sites: list[dict] = []
+    for token, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        pos = first_pos.get(token, -1)
+        excerpt = ("…" + text[max(0, pos - 40):pos + 50] + "…") if pos >= 0 else token
+        sites.append({"page": page_number, "word": token, "count": count, "excerpt": excerpt})
+    return sites
+
+
 # How each gate reason is explained to the cleanup model. A generic
 # 'fix obvious OCR errors' does not engage the model: at 27B the damage
 # passes through unchanged. With the damage CLASS described (verified

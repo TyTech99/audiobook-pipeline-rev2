@@ -563,6 +563,59 @@ def test_verify_cleanup_keeps_only_defect_attributed_repairs():
     assert record["kept"] == []
 
 
+def test_declare_page_words_flags_non_dictionary_words(tmp_path, monkeypatch):
+    # Issue #68: page-gate-blind misreads ('almos') and the author's rare
+    # words ('slaid') are DECLARED — counted in the fidelity report, never
+    # silently shipped, never repaired here (#66 adjudicates).
+    from worker.prep.ocr_cleanup import declare_page_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "there\nare\nsome\nwho\nfaced\nby\nsecond\nworld\nwar\nin\n"
+        "generation\nfeel\nthat\nit\nmight\nhave\nbeen\nbetter\nthe\nof\n"
+        "author\naccount\nwas\nalmost\ncomplete\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    text = (
+        "There are some who, faced by a second world war in a generation, almos feel "
+        "that it might have been better. The author's account of 1940 was almost complete."
+    )
+    sites = declare_page_words(8, text, "eng")
+    words = {s["word"]: s for s in sites}
+    assert "almos" in words
+    assert words["almos"]["page"] == 8
+    assert words["almos"]["count"] == 1
+    assert "almos" in words["almos"]["excerpt"]
+    # Dictionary words, the apostrophe word ('author's' via its stem), and
+    # pure-number tokens ('1940' — dicts.py's WORD_RE requires letters) are
+    # never declared.
+    assert "author's" not in words
+    assert "1940" not in words
+    assert "almost" not in words
+    # Most-frequent first: a word appearing twice sorts ahead.
+    (dictdir / "american-english-large").write_text(
+        "the\nof\nwar\npeace\nworld\nsecond\ngeneration\nsome\nwho\nfaced\n"
+        "almos\nfeel\nthat\nit\nmight\nhave\nbeen\nbetter\nthere\nare\n"
+        "author\naccount\nwas\nalmost\ncomplete\n"
+    )
+    text2 = "Slaid aside, slaid again: the slaid sword of 1940." \
+            " There are some who, faced by a second world war in a generation, almos feel peace."
+    sites2 = declare_page_words(8, text2, "eng")
+    assert sites2[0]["word"] == "slaid" and sites2[0]["count"] == 3
+    assert any(s["word"] == "almos" for s in sites2)
+
+
+def test_declare_page_words_degrades_gracefully_without_word_list(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import declare_page_words
+
+    empty = tmp_path / "no-dicts"
+    empty.mkdir()
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(empty))
+    assert declare_page_words(8, "any text at all", "eng") == []
+
+
 def test_verify_cleanup_reverts_structural_damage():
     # Issue #65: the line sequence is the paragraph witness.
     from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup

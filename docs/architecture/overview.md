@@ -52,7 +52,7 @@ Voice recipes live in a **separate git repo** from the pipeline code. This enabl
 **Tech stack:** Python, PyMuPDF (PDF parsing), Calibre (EPUB manipulation), isbnlib, LLM, Redis client
 
 **Input formats:** PDF, EPUB
-**Output:** Book package (EPUB + script.json + page-ledger.json + cover.jpg + metadata.json + llm-analysis.json + cleanup-log.json + fidelity-report.json)
+**Output:** Book package (EPUB + script.json + page-ledger.json + cover.jpg + metadata.json + llm-analysis.json + cleanup-log.json + fidelity-report.json + ocr-quality.json)
 
 ### TTS Worker (GPU)
 
@@ -218,6 +218,7 @@ s3://audiobook-pipeline/
 │       ├── llm-analysis.json
 │       ├── cleanup-log.json
 │       ├── fidelity-report.json
+│       ├── ocr-quality.json
 │       └── manifest.json
 ├── audio/
 │   └── {job_id}/
