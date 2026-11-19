@@ -528,6 +528,9 @@ def test_frontmatter_dedication():
 
 
 def test_frontmatter_preface():
+    # Preface pages are section boundaries now, not a frontmatter page type:
+    # structure.py's unnumbered-section detection spans the whole preface,
+    # so classify_frontmatter must not label only the heading page.
     from worker.prep.frontmatter import classify_frontmatter
 
     pages = [
@@ -535,7 +538,34 @@ def test_frontmatter_preface():
         {"page": 2, "text": "PREFACE\n\nI wrote this book because I wanted to share my story with the world. " * 5},
     ]
     result = classify_frontmatter(pages)
-    assert result.get(2) == "frontmatter-preface"
+    assert result.get(1) == "frontmatter-title"
+    assert 2 not in result
+
+
+def test_frontmatter_title_page_with_year():
+    # The publication year on a title page ("1940") is not a page number.
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "UNFINISHED\nVICTORY\nb\nARTHUR BRYANT\nLONDON\nMACMILLAN & CO. LTD\n1940"},
+        {"page": 2, "text": "Chapter 1\n\nBody text. " * 20},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(1) == "frontmatter-title"
+    assert 2 not in result
+
+
+def test_frontmatter_epigraph():
+    from worker.prep.frontmatter import classify_frontmatter
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH"},
+        {"page": 2, "text": "For my wife, who understood"},
+        {"page": 3, "text": "\u201c History is philosophy learned from examples.\u201d\nTHUCYDIDES"},
+    ]
+    result = classify_frontmatter(pages)
+    assert result.get(2) == "frontmatter-dedication"
+    assert result.get(3) == "frontmatter-epigraph"
 
 
 def test_frontmatter_not_detected_in_body():
@@ -607,20 +637,23 @@ def test_page_ledger_with_frontmatter():
 
 
 def test_unnumbered_section_detection():
+    # Real-book shape (Unfinished Victory p.5): the section heading, an
+    # ALL-CAPS subtitle, then mixed-case body text. The subtitle is the
+    # title; the body line must NOT be swallowed into it.
     from worker.prep.structure import find_headings
 
     units = [
-        {"pdf_page": 1, "half": None, "text": "INTRODUCTION\n\nThe Historian's Testament\n\nThis book is based upon a larger work.", "geom": None, "normalized": {}},
+        {"pdf_page": 1, "half": None, "text": "INTRODUCTION\n\nHISTORIAN\u2019S TESTAMENT\n\nTHIS book, which is based upon a larger work now slaid aside, was written before the war. I wrote it as an historian\u2019s attempt to retell the story.", "geom": None, "normalized": {}},
         {"pdf_page": 2, "half": None, "text": "More introduction text here.", "geom": None, "normalized": {}},
-        {"pdf_page": 3, "half": None, "text": "CHAPTER ONE\n\nThe Treaty of Versailles\n\nThe peace which ended the Great War.", "geom": None, "normalized": {}},
-        {"pdf_page": 4, "half": None, "text": "PART II\n\nThe War Years\n\nThe war began in 1939.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER ONE\n\nTHE TREATY OF VERSAILLES\n\nThe peace which ended the Great War.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "PART II\n\nTHE WAR YEARS\n\nThe war began in 1939.", "geom": None, "normalized": {}},
         {"pdf_page": 5, "half": None, "text": "More war text.", "geom": None, "normalized": {}},
-        {"pdf_page": 6, "half": None, "text": "EPILOGUE\n\nThe Aftermath\n\nThe war ended in 1945.", "geom": None, "normalized": {}},
+        {"pdf_page": 6, "half": None, "text": "EPILOGUE\n\nTHE AFTERMATH\n\nThe war ended in 1945.", "geom": None, "normalized": {}},
     ]
     heads = find_headings(units)
     assert len(heads) == 4
     assert heads[0]["label"] == "Introduction"
-    assert heads[0]["title"] == "The Historian's Testament"
+    assert heads[0]["title"] == "Historian\u2019s Testament"
     assert heads[1]["title"] == "The Treaty of Versailles"
     assert heads[2]["label"] == "Part II"
     assert heads[2]["title"] == "The War Years"
@@ -632,10 +665,10 @@ def test_unnumbered_section_with_chapters():
     from worker.prep.structure import find_headings
 
     units = [
-        {"pdf_page": 1, "half": None, "text": "PROLOGUE\n\nThe Beginning\n\nIt started on a cold winter night.", "geom": None, "normalized": {}},
-        {"pdf_page": 2, "half": None, "text": "CHAPTER 1\n\nThe First Day\n\nThe sun rose over the hills.", "geom": None, "normalized": {}},
-        {"pdf_page": 3, "half": None, "text": "CHAPTER 2\n\nThe Second Day\n\nThe journey continued.", "geom": None, "normalized": {}},
-        {"pdf_page": 4, "half": None, "text": "AFTERWORD\n\nReflections\n\nLooking back on the journey.", "geom": None, "normalized": {}},
+        {"pdf_page": 1, "half": None, "text": "PROLOGUE\n\nTHE BEGINNING\n\nIt started on a cold winter night.", "geom": None, "normalized": {}},
+        {"pdf_page": 2, "half": None, "text": "CHAPTER 1\n\nTHE FIRST DAY\n\nThe sun rose over the hills.", "geom": None, "normalized": {}},
+        {"pdf_page": 3, "half": None, "text": "CHAPTER 2\n\nTHE SECOND DAY\n\nThe journey continued.", "geom": None, "normalized": {}},
+        {"pdf_page": 4, "half": None, "text": "AFTERWORD\n\nREFLECTIONS\n\nLooking back on the journey.", "geom": None, "normalized": {}},
     ]
     heads = find_headings(units)
     assert len(heads) == 4
@@ -645,3 +678,36 @@ def test_unnumbered_section_with_chapters():
     assert heads[2]["title"] == "The Second Day"
     assert heads[3]["label"] == "Afterword"
     assert heads[3]["title"] == "Reflections"
+
+
+def test_detect_chapters_excludes_toc_page():
+    # The CONTENTS page's 'CHAPTER 1' entry lines are not real headings;
+    # detect_chapters must skip frontmatter-toc pages when scanning.
+    from worker.prep.pdf_parser import detect_chapters
+
+    pages = [
+        {"page": 1, "text": "THE GREAT ADVENTURE\n\nby\n\nJOHN SMITH", "images": 0},
+        {"page": 2, "text": "CONTENTS\n\nCHAPTER 1 ......... 9\nCHAPTER 2 ......... 20", "images": 0},
+        {"page": 3, "text": "CHAPTER 1\n\nTHE TREATY\n\nBody text of the first chapter follows here.", "images": 0},
+        {"page": 4, "text": "More body text of chapter one.", "images": 0},
+    ]
+    chapters = detect_chapters(pages)
+    assert len(chapters) == 1
+    assert chapters[0]["section"] == "chapter-1"
+    assert chapters[0]["start_page"] == 3
+    assert chapters[0]["pages"] == [3, 4]
+
+
+def test_detect_chapters_unnumbered_section_slug():
+    from worker.prep.pdf_parser import detect_chapters
+
+    pages = [
+        {"page": 1, "text": "INTRODUCTION\n\nHISTORIAN\u2019S TESTAMENT\n\nTHIS book, which is based upon a larger work now slaid aside, was written before the war.", "images": 0},
+        {"page": 2, "text": "More introduction text here.", "images": 0},
+    ]
+    chapters = detect_chapters(pages)
+    assert len(chapters) == 1
+    assert chapters[0]["section"] == "section-introduction"
+    assert chapters[0]["label"] == "Introduction"
+    assert chapters[0]["title"] == "Historian\u2019s Testament"
+    assert chapters[0]["pages"] == [1, 2]

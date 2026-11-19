@@ -178,12 +178,13 @@ def find_headings(units):
                     k = li + 1
                     while k < len(lines) and not lines[k].strip():
                         k += 1
+                    # Title lines after the heading: upper-case lines only
+                    # (the title of 'INTRODUCTION' is 'HISTORIAN'S TESTAMENT',
+                    # set in caps; the first mixed-case line is body text).
                     title = []
-                    while k < len(lines) and lines[k].strip():
+                    while k < len(lines) and lines[k].strip() and len(title) < 3:
                         line_text = lines[k].strip()
-                        if len(line_text) > 40 and not pageparts._mostly_upper(line_text) and "." in line_text:
-                            break
-                        if len(line_text) > 10 and any(c in line_text for c in ".!?") and not pageparts._mostly_upper(line_text):
+                        if not pageparts._mostly_upper(line_text):
                             break
                         if len(line_text) > 50:
                             break
