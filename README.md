@@ -179,6 +179,28 @@ curl -s http://127.0.0.1:8000/api/v1/jobs/{convert_job_id} \
 
 When `status` is `complete`, read `output_url`. It looks like `file:///var/lib/audiobook/audio/{job_id}/`.
 
+### 5. Download artifacts over the API
+
+List a job's finished artifacts (works for prep packages and convert audio
+output alike, nested files such as `m4b/audiobook.m4b` included):
+
+```bash
+curl -s http://127.0.0.1:8000/api/v1/jobs/{job_id}/artifacts \
+  -H "Authorization: Bearer $API_KEY_OPERATOR"
+```
+
+Download one as an attachment (correct media type, `Content-Disposition:
+attachment`):
+
+```bash
+curl -s -OJ http://127.0.0.1:8000/api/v1/jobs/{job_id}/artifacts/book.epub \
+  -H "Authorization: Bearer $API_KEY_OPERATOR"
+```
+
+Filenames are restricted to `[A-Za-z0-9._-]` path components — traversal
+attempts are rejected with 400 before any filesystem access. A job with no
+artifacts yet returns 404 `artifacts_not_found`.
+
 ### Python equivalent
 
 ```python
