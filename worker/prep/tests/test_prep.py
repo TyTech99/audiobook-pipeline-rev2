@@ -699,13 +699,24 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
         "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
         "for\nmore\nform\nore\n"
+        # junk fragments that real word-lists carry: dictionary-present but
+        # never book-witnessed — they must NOT veto the true splits
+        # (regression: the pre-witness-pruning rule refused anend/himnoharm
+        # on exactly these garbage decompositions)
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
     )
     monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
 
     pages = [
         # A corpus page that witnesses every repair segment as the author's
-        # own usage — the witness requirement is part of the rule.
-        {"page": 5, "ocr_quality": {"passed": True}, "text": "so did an end come with no harm to him."},
+        # own usage — the witness requirement is part of the rule — and
+        # witnesses the ambiguity words so 'formore' is refused by
+        # AMBIGUITY, not by missing witnesses.
+        {
+            "page": 5,
+            "ocr_quality": {"passed": True},
+            "text": "so did an end come with no harm to him. the form of ore was more for them.",
+        },
         {"page": 18, "ocr_quality": {"passed": True}, "text": "they might have didso. better."},
         {"page": 6, "ocr_quality": {"passed": True}, "text": "will one day come to anend."},
         {"page": 21, "ocr_quality": {"passed": True}, "text": "they did himnoharm. and knew it."},
@@ -729,6 +740,7 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
         "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
         "for\nmore\nform\nore\n"
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
     )
     pages2 = [
         {"page": 5, "ocr_quality": {"passed": True}, "text": "so did an end come with no harm to him."},

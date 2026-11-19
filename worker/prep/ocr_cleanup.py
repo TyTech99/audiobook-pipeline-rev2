@@ -473,17 +473,20 @@ def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
     """Deterministic missing-space repairs for joined dictionary words (#72).
 
     A declared (non-dictionary) word on an OCR page is repaired in place iff
-    it has EXACTLY ONE full decomposition into dictionary words — every
-    segment at least two letters and witnessed in the book's own parsed
-    text:
+    it has EXACTLY ONE book-witnessed full decomposition into dictionary
+    words — every segment at least two letters and witnessed in the book's
+    own parsed text:
 
         'didso' -> did | so        'anend' -> an | end
         'himnoharm' -> him | no | harm
 
-    Ambiguity refuses: two valid decompositions means no repair, ever
-    ('formore' splits for|more AND form|ore — it stays declared). Words
-    that do not decompose (proper nouns, substitution-shaped damage like
-    'scon') stay declared for #66's image pass. Only OCR pages are
+    The witness check PRUNES candidate decompositions before uniqueness is
+    judged: dictionary word-lists carry junk fragments ('ane', 'nd'), and a
+    split the book itself never writes ('anend' -> ane|nd) must not veto a
+    true repair (an|end). Two BOOK-WITNESSED decompositions still refuses,
+    ever ('formore' splits for|more AND form|ore — it stays declared).
+    Words that do not decompose (proper nouns, substitution-shaped damage
+    like 'scon') stay declared for #66's image pass. Only OCR pages are
     touched; text-layer pages are the book's own typeset text. Returns
     per-page records; each repaired page's "text" is updated in place and
     "joined_repairs" set.
@@ -513,15 +516,23 @@ def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
                     if token[start:end] in dictionary:
                         for rest in decompose(end):
                             results.append([token[start:end]] + rest)
-                            if len(results) > 1:
-                                break
-                        if len(results) > 1:
-                            break
             memo[start] = results
             return results
 
-        ways = [w for w in decompose(0) if len(w) > 1]
-        if len(ways) == 1 and all(seg in corpus_words for seg in ways[0]):
+        # Enumerate EVERYTHING before pruning: a truncated enumeration
+        # (stop at two ways) lets an unwitnessed garbage split that happens
+        # to enumerate first veto a true repair that comes later — exactly
+        # the 'himnoharm' defect. The cap only guards pathological
+        # word-lists: 64 decompositions of one token means refuse.
+        all_ways = decompose(0)
+        if len(all_ways) > 64:
+            return None
+        ways = [
+            w
+            for w in all_ways
+            if len(w) > 1 and all(seg in corpus_words for seg in w)
+        ]
+        if len(ways) == 1:
             return ways[0]
         return None
 
