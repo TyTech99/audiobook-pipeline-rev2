@@ -29,7 +29,9 @@ class OcrQualitySettings:
     max_digit_letter_tokens: int = 0
     language: str = "eng"
     llm_cleanup_enabled: bool = True
-    llm_cleanup_temperature: float = 0.1
+    # TurkuNLP ACL-2025 Optuna optimum for English OCR post-correction
+    # (temp 0.26, top_k 65, top_p 0.66); 0.1 is too cold for this task.
+    llm_cleanup_temperature: float = 0.26
     llm_cleanup_max_tokens: int = 4096
     llm_cleanup_system_prompt: str = ""
 
@@ -46,7 +48,7 @@ class OcrQualitySettings:
             max_digit_letter_tokens=int(ocr.get("max_digit_letter_tokens", 0)),
             language=str(ocr.get("language", "eng")),
             llm_cleanup_enabled=bool(llm_cleanup.get("enabled", True)),
-            llm_cleanup_temperature=float(llm_cleanup.get("temperature", 0.1)),
+            llm_cleanup_temperature=float(llm_cleanup.get("temperature", 0.26)),
             llm_cleanup_max_tokens=int(llm_cleanup.get("max_tokens", 4096)),
             llm_cleanup_system_prompt=str(llm_cleanup.get("system_prompt", "")).strip(),
         )
@@ -139,6 +141,46 @@ def needs_llm_cleanup(ocr_result: dict, settings: OcrQualitySettings) -> bool:
     return not judgment["passed"]
 
 
+# How each gate reason is explained to the cleanup model. A generic
+# 'fix obvious OCR errors' does not engage the model: at 27B the damage
+# passes through unchanged. With the damage CLASS described (verified
+# live on Unfinished Victory p.22 against Qwen3.8-27B: 'ry did not' ->
+# 'Germany did not' and '10 other' -> 'no other' only when the
+# instruction named the class), the same model repairs both (#50).
+REASON_INSTRUCTIONS = {
+    "mid_line_lower_restart": (
+        "A lowercase fragment continuing after terminal punctuation mid-line "
+        "(like 'fight. ry did not') is a line whose opening was clipped by the "
+        "scan edge: reconstruct the missing opening word(s) from context - the "
+        "fragment itself may be the tail of the clipped word"
+    ),
+    "digit_letter_token": (
+        "Tokens mixing digits and letters are OCR misreads of printed words "
+        "(a common case is 'no' read as '10'); infer and restore the printed "
+        "word from the sentence"
+    ),
+    "low_dict_share": (
+        "Words not found in the dictionary may be broken OCR of real words: "
+        "repair the clearly broken ones, but keep proper nouns, place names "
+        "and period spellings as printed"
+    ),
+    "low_confidence": (
+        "Overall recognition confidence is low for this page: read carefully "
+        "for misrecognized characters and broken words"
+    ),
+}
+
+
+def _repair_instructions(reasons: list[str]) -> list[str]:
+    """Concrete repair instructions for the reasons the gate reported."""
+    out = []
+    for reason in reasons:
+        instruction = REASON_INSTRUCTIONS.get(reason.split(" ")[0])
+        if instruction and instruction not in out:
+            out.append(instruction)
+    return out
+
+
 async def cleanup_page_with_llm(
     llm_client,
     page_number: int,
@@ -160,12 +202,16 @@ async def cleanup_page_with_llm(
     """
     system_prompt = settings.llm_cleanup_system_prompt or _DEFAULT_SYSTEM_PROMPT
 
+    repairs = _repair_instructions(quality.get("reasons", []))
+    repairs_text = ("\nThis page's specific damage — repair it:\n"
+                    + "\n".join("- " + r for r in repairs) + "\n"
+                    if repairs else "")
+
     prompt = f"""Clean up the following OCR-extracted text from page {page_number} of a book.
 
-Quality issues detected: {', '.join(quality['reasons'])}
 Mean confidence: {quality['confidence']:.1f}%
 Dictionary share: {quality['dict_share']:.1%}
-
+{repairs_text}
 Rules:
 - Fix obvious OCR errors (misrecognized characters, broken words, hyphenation artifacts)
 - Remove page headers, footers, page numbers, and running titles

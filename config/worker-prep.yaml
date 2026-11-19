@@ -63,7 +63,7 @@ ocr:
   # LLM cleanup for low-quality OCR pages
   llm_cleanup:
     enabled: true
-    temperature: 0.1
+    temperature: 0.26  # TurkuNLP ACL-2025 optimum for English OCR post-correction
     max_tokens: 4096
     system_prompt: |
       You are an OCR text cleanup specialist. Your job is to fix OCR errors in extracted book text while preserving the original meaning and wording.

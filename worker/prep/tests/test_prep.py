@@ -336,6 +336,44 @@ def test_cleanup_page_with_llm_preserves_indent_and_uses_chat_text():
     assert "preserve each line" in captured["user"].lower()
 
 
+def test_cleanup_prompt_carries_targeted_repair_instructions():
+    # Issue #50: gate reasons are translated into concrete repair
+    # instructions. A generic 'fix obvious OCR errors' leaves the damage
+    # untouched even at 27B; naming the damage class engages the model
+    # (verified live on the real p.22 damage).
+    import asyncio
+    from worker.prep.ocr_cleanup import OcrQualitySettings, cleanup_page_with_llm
+
+    captured = {}
+
+    class FakeClient:
+        def chat_text(self, *, system, user, temperature, max_tokens):
+            captured["user"] = user
+            captured["temperature"] = temperature
+            return "text"
+
+    settings = OcrQualitySettings()
+    quality = {"reasons": ["mid_line_lower_restart (1 > 0)", "digit_letter_token (2 > 0)"],
+               "confidence": 94.9, "dict_share": 0.989}
+    asyncio.run(cleanup_page_with_llm(FakeClient(), 22, "text", quality, settings))
+
+    user = captured["user"]
+    # The damage classes are described concretely...
+    assert "clipped by the" in user and "reconstruct the missing opening word" in user
+    assert "'no' read as '10'" in user
+    # ...not left as bare gate reason strings
+    assert "mid_line_lower_restart (1 > 0)" not in user
+    assert "digit_letter_token (2 > 0)" not in user
+    # Study-optimal default temperature.
+    assert settings.llm_cleanup_temperature == 0.26
+    assert captured["temperature"] == 0.26
+
+    # Unknown reasons produce no bogus instructions, and the prompt still builds.
+    quality2 = {"reasons": ["too_few_chars (5 < 10)"], "confidence": 0.0, "dict_share": 0.0}
+    asyncio.run(cleanup_page_with_llm(FakeClient(), 7, "text", quality2, settings))
+    assert "specific damage" not in captured["user"]
+
+
 def test_prep_worker_uses_analyzer(tmp_path):
     from worker.prep.worker import PrepWorker
 
