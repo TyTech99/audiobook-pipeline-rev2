@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import logging
 import re
+import string
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -165,6 +166,16 @@ def _clipped_word_index(orig_line: str) -> int | None:
     return len(orig_line[: match.end() - 1].split())
 
 
+def _core_token(word: str) -> str:
+    """A token stripped of surrounding punctuation, for signature tests.
+
+    The gate's findall matches junk inside flowing text ('IQI4.' is
+    digit-letter damage); word-level tests must strip the punctuation the
+    sentence glued on, or punctuated junk escapes attribution.
+    """
+    return word.strip(string.punctuation)
+
+
 def _repair_class(
     orig_span: list[str],
     new_span: list[str],
@@ -178,7 +189,8 @@ def _repair_class(
     deterministic damage signature (#65):
 
     - ``digit_letter`` — the span is pure junk: EVERY original word in it
-      mixes digits and letters and no replacement word does. A span mixing a
+      mixes digits and letters (punctuation stripped, as the gate's own
+      findall sees them) and no replacement word does. A span mixing a
       junk token with an unattributed edit reverts whole — no partial trust.
     - ``clipped_line`` — the span contains the clipped fragment word and the
       repaired line clears the clip signature. The opening region of a
@@ -189,8 +201,8 @@ def _repair_class(
     Word substitutions with no signature (the period-spelling 'fix' class)
     return None and revert.
     """
-    if orig_span and all(_DIGIT_LETTER_TOKEN_RE.fullmatch(w) for w in orig_span) and not any(
-        _DIGIT_LETTER_TOKEN_RE.fullmatch(w) for w in new_span
+    if orig_span and all(_DIGIT_LETTER_TOKEN_RE.fullmatch(_core_token(w)) for w in orig_span) and not any(
+        _DIGIT_LETTER_TOKEN_RE.fullmatch(_core_token(w)) for w in new_span
     ):
         return "digit_letter"
     if (

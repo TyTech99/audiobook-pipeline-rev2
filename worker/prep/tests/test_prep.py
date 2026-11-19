@@ -545,6 +545,23 @@ def test_verify_cleanup_keeps_only_defect_attributed_repairs():
     assert text == "her close on a million"
     assert record["kept"] == []
 
+    # Punctuated junk keeps its attribution ('IQI4.' is digit-letter damage
+    # with a sentence period glued on) — the gate's findall sees it; the
+    # word-level test must strip punctuation the same way.
+    text, record = verify_cleanup(41, "the year IQI4. was one", "the year 1914. was one", settings)
+    assert text == "the year 1914. was one"
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+    # Comma-glued junk likewise: '1g19,' -> '1919,'.
+    text, record = verify_cleanup(41, "in 1g19, the war ended", "in 1919, the war ended", settings)
+    assert text == "in 1919, the war ended"
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+    # Pure digits stay unattributable even punctuated — numeral ambiguity (#66).
+    text, record = verify_cleanup(41, "he said 10. other", "he said no. other", settings)
+    assert text == "he said 10. other"
+    assert record["kept"] == []
+
 
 def test_verify_cleanup_reverts_structural_damage():
     # Issue #65: the line sequence is the paragraph witness.
