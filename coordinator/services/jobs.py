@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from uuid import uuid4
 
 import redis
@@ -16,6 +18,82 @@ from coordinator.errors import ApiError
 
 def _storage_root() -> str:
     return os.environ.get("STORAGE_ROOT", "/var/lib/audiobook")
+
+
+_ARTIFACT_MEDIA_TYPES = {
+    ".epub": "application/epub+zip",
+    ".json": "application/json",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".m4b": "audio/mp4",
+    ".mp3": "audio/mpeg",
+    ".txt": "text/plain",
+    ".pdf": "application/pdf",
+}
+
+
+def _media_type(filename: str) -> str:
+    return _ARTIFACT_MEDIA_TYPES.get(os.path.splitext(filename)[1].lower(), "application/octet-stream")
+
+
+def _artifact_dir(row: dict) -> str | None:
+    """Local directory holding a job's artifacts (audio output first, else package)."""
+    url = row["output_url"] or row["package_url"]
+    if not url or not url.startswith("file://"):
+        return None
+    return url[len("file://"):].rstrip("/") + "/"
+
+
+def _artifact_components(filename: str) -> list[str] | None:
+    """Split an artifact path into safe components, or None if unsafe."""
+    parts = [p for p in filename.split("/") if p]
+    if not parts:
+        return None
+    for part in parts:
+        if part in (".", "..") or not re.fullmatch(r"[A-Za-z0-9._-]+", part):
+            return None
+    return parts
+
+
+def list_artifacts(conn: Connection, job_id) -> dict:
+    """List downloadable artifacts for a job (#57)."""
+    row = _load_job(conn, job_id)
+    directory = _artifact_dir(row)
+    if directory is None or not os.path.isdir(directory):
+        raise ApiError(404, "artifacts_not_found", "no artifacts available for this job")
+    artifacts = []
+    for current_root, dirnames, filenames in os.walk(directory):
+        dirnames.sort()
+        for name in sorted(filenames):
+            rel = os.path.relpath(os.path.join(current_root, name), directory)
+            path = os.path.join(current_root, name)
+            artifacts.append(
+                {
+                    "filename": rel,
+                    "size_bytes": os.path.getsize(path),
+                    "media_type": _media_type(name),
+                    "url": f"/api/v1/jobs/{job_id}/artifacts/{rel}",
+                }
+            )
+    return {"job_id": str(job_id), "status": row["status"], "artifacts": artifacts}
+
+
+def get_artifact(conn: Connection, job_id, filename: str) -> tuple[str, str]:
+    """Resolve an artifact to (local_path, media_type) for download (#57).
+
+    Path components are restricted to [A-Za-z0-9._-] — no traversal, no
+    absolute paths, no hidden tricks.
+    """
+    parts = _artifact_components(filename)
+    if parts is None:
+        raise ApiError(400, "invalid_request", "invalid artifact filename")
+    row = _load_job(conn, job_id)
+    directory = _artifact_dir(row)
+    path = os.path.join(directory, *parts) if directory else None
+    if path is None or not os.path.isfile(path):
+        raise ApiError(404, "artifact_not_found", "artifact not found")
+    return path, _media_type(parts[-1])
 
 PREP_QUEUE = "prep:pending"
 CONVERT_QUEUE = "convert:pending"
