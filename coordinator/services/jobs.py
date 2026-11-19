@@ -38,11 +38,20 @@ def _media_type(filename: str) -> str:
 
 
 def _artifact_dir(row: dict) -> str | None:
-    """Local directory holding a job's artifacts (audio output first, else package)."""
+    """Local directory holding a job's artifacts (audio output first, else package).
+
+    Workers report package_url/output_url as bare absolute paths, while the
+    API's own submit path (convert jobs) stores file:// URLs — accept both,
+    reject anything non-local (s3://, https://, relative paths).
+    """
     url = row["output_url"] or row["package_url"]
-    if not url or not url.startswith("file://"):
+    if not url:
         return None
-    return url[len("file://"):].rstrip("/") + "/"
+    if url.startswith("file://"):
+        url = url[len("file://"):]
+    if not os.path.isabs(url):
+        return None
+    return url.rstrip("/") + "/"
 
 
 def _artifact_components(filename: str) -> list[str] | None:

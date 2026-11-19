@@ -241,7 +241,17 @@ def test_list_and_download_artifacts(app, sql, tmp_path):
     (pkg / "cover.jpg").write_bytes(b"JPGDATA")
     (pkg / "m4b" / "audiobook.m4b").write_bytes(b"M4BDATA")
     job_id = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0a"
+    # Workers report bare absolute paths (no file:// prefix) — the API's
+    # own submit path stores file:// URLs. Both must resolve (#57).
     _insert_finished_job(sql, job_id, f"file://{pkg}/")
+
+    bare_job = "0e0e0e0e-0e0e-4e0e-8e0e-0e0e0e0e0e0d"
+    _insert_finished_job(sql, bare_job, f"{pkg}/")
+    bare_resp = app.get(f"/api/v1/jobs/{bare_job}/artifacts", headers=OP)
+    assert bare_resp.status_code == 200
+    assert {a["filename"] for a in bare_resp.json()["artifacts"]} == {
+        "book.epub", "cover.jpg", "m4b/audiobook.m4b",
+    }
 
     resp = app.get(f"/api/v1/jobs/{job_id}/artifacts", headers=OP)
     assert resp.status_code == 200
