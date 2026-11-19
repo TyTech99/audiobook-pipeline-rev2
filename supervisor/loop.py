@@ -33,4 +33,5 @@ def run_loop(client: CoordinatorClient, docker: DockerManager, sleep, stop, hard
                 logger.info("Queue '%s' has %d jobs, starting %s worker", queue, queue_depths[queue], worker_type)
                 docker.start_worker(worker_type)
         docker.check_idle(queue_depths, time.time())
+        docker.check_worker_images(queue_depths)
         sleep()
