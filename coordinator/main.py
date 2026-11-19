@@ -48,8 +48,8 @@ def create_app(settings: Settings) -> FastAPI:
         async def reaper_loop():
             while True:
                 try:
-                    stats = run_reaper(client, visibility_timeout, max_retries)
-                    if stats["requeued"] or stats["dead_lettered"]:
+                    stats = run_reaper(client, visibility_timeout, max_retries, pool=pool)
+                    if any(stats.values()):
                         logger.info("Reaper: %s", stats)
                 except Exception as e:
                     logger.error("Reaper error: %s", e)

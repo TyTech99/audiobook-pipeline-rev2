@@ -4,6 +4,8 @@ pytestmark = pytest.mark.usefixtures("clean_db")
 
 OP = {"Authorization": "Bearer operator-secret"}
 
+from coordinator.services.jobs import PREP_QUEUE, CONVERT_QUEUE
+
 
 def test_submit_prep_job_creates_record_and_queue_message(app, sql):
     response = app.post(
@@ -29,9 +31,9 @@ def test_submit_prep_job_creates_record_and_queue_message(app, sql):
     assert rows[0]["input_url"] == "s3://bucket/inputs/test/source.pdf"
 
     redis_client = app.app.state.redis
-    depth = redis_client.llen("prep")
+    depth = redis_client.llen(PREP_QUEUE)
     assert depth == 1
-    message = redis_client.lpop("prep")
+    message = redis_client.lpop(PREP_QUEUE)
     import json
 
     msg = json.loads(message)
@@ -59,7 +61,7 @@ def test_submit_prep_job_with_page_range(app, sql):
     assert rows[0]["metadata"]["page_range"] == [1, 50]
 
     redis_client = app.app.state.redis
-    message = redis_client.lpop("prep")
+    message = redis_client.lpop(PREP_QUEUE)
     import json
 
     msg = json.loads(message)
@@ -78,7 +80,9 @@ def test_submit_prep_job_invalid_page_range(app, sql):
         },
     )
     assert response.status_code == 400
-    assert "page_range" in response.json()["detail"]
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert "page_range" in body["error"]["message"]
 
 
 def test_submit_convert_job(app, sql):
@@ -102,10 +106,10 @@ def test_submit_convert_job(app, sql):
     assert rows[0]["input_url"] == "file:///var/lib/audiobook/packages/prep-id/"
 
     redis_client = app.app.state.redis
-    assert redis_client.llen("convert") == 1
+    assert redis_client.llen(CONVERT_QUEUE) == 1
     import json
 
-    msg = json.loads(redis_client.lpop("convert"))
+    msg = json.loads(redis_client.lpop(CONVERT_QUEUE))
     assert msg["package_url"] == "file:///var/lib/audiobook/packages/prep-id/"
     assert msg["input_url"] == msg["package_url"]
     assert msg["performance_style"] == "neutral"

@@ -22,6 +22,7 @@ CONVERT_QUEUE = "convert:pending"
 PREP_PROCESSING = "prep:processing"
 CONVERT_PROCESSING = "convert:processing"
 FAILED_QUEUE = "failed"
+CLAIMS_HASH = "job:claims"  # single definition; reaper.py imports this
 
 PREP_TRANSITIONS = {
     "submitted": {"in_progress", "cancelled"},
@@ -194,7 +195,7 @@ def _verify_claim_token(job_id, body: dict, redis_client: redis.Redis | None) ->
     token = body.get("claim_token")
     if token is None or redis_client is None:
         return  # No token provided or no Redis — skip verification (backward compat)
-    stored = redis_client.hget("job:claims", str(job_id))
+    stored = redis_client.hget(CLAIMS_HASH, str(job_id))
     if stored is None:
         return  # No claim record — job may have been completed already
     # Claim record format: "timestamp:token"
