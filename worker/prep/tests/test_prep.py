@@ -248,6 +248,53 @@ def test_build_epub():
         assert 'xmlns:epub="http://www.idpf.org/2007/ops"' in chapter
 
 
+def test_extract_cover_grayscale_scan_pdf():
+    # Issue #79: grayscale scan images crashed the RGB-only frombytes
+    # path ("not enough image data" at pix.n == 1). Extraction now decodes
+    # the stream with PIL, which handles any colorspace.
+    import io as _io
+
+    import fitz
+    from PIL import Image as _Image
+
+    from worker.prep.cover import extract_cover_from_pdf
+
+    gray = _Image.new("L", (60, 90), color=128)
+    buf = _io.BytesIO()
+    gray.save(buf, format="PNG")
+    doc = fitz.Document()
+    page = doc.new_page(width=200, height=300)
+    page.insert_image(fitz.Rect(0, 0, 200, 300), stream=buf.getvalue())
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    cover = extract_cover_from_pdf(pdf_bytes)
+    assert cover is not None
+    img = _Image.open(_io.BytesIO(cover))
+    assert img.format == "JPEG" and img.mode == "RGB"
+
+
+def test_extract_cover_failure_never_crashes_the_job():
+    # Issue #79 containment: any extraction failure returns None so
+    # get_cover's fallback chain (OpenLibrary search -> placeholder)
+    # can run; no PDF may fail a job over cover art.
+    import io as _io
+
+    from PIL import Image as _Image
+
+    from worker.prep.cover import extract_cover_from_pdf, get_cover
+
+    assert extract_cover_from_pdf(b"not a pdf at all") is None
+
+    class _NoSearch:
+        def get(self, *args, **kwargs):
+            raise RuntimeError("network down")
+
+    cover, source = get_cover(b"not a pdf at all", "pdf", "Some Title", "Some Author", http=_NoSearch())  # type: ignore[arg]
+    assert source == "placeholder"
+    img = _Image.open(_io.BytesIO(cover))
+    assert img.format == "JPEG"
+
+
 def test_build_epub_embeds_cover():
     pages = [{"page": 1, "text": "Body text.", "images": 0}]
     chapters = [
