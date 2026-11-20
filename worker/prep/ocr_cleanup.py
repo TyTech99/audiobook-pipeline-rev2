@@ -6,8 +6,11 @@ not hardcoded.
 
 from __future__ import annotations
 
+import bisect
+import difflib
 import logging
 import re
+import string
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
@@ -34,6 +37,9 @@ class OcrQualitySettings:
     llm_cleanup_temperature: float = 0.26
     llm_cleanup_max_tokens: int = 4096
     llm_cleanup_system_prompt: str = ""
+    # Verify-and-revert (#65): accept only defect-attributed repairs.
+    # False restores verbatim acceptance of the model output.
+    llm_cleanup_verify: bool = True
 
     @classmethod
     def from_config(cls, config: dict) -> "OcrQualitySettings":
@@ -51,6 +57,7 @@ class OcrQualitySettings:
             llm_cleanup_temperature=float(llm_cleanup.get("temperature", 0.26)),
             llm_cleanup_max_tokens=int(llm_cleanup.get("max_tokens", 4096)),
             llm_cleanup_system_prompt=str(llm_cleanup.get("system_prompt", "")).strip(),
+            llm_cleanup_verify=bool(llm_cleanup.get("verify", True)),
         )
 
 
@@ -141,6 +148,437 @@ def needs_llm_cleanup(ocr_result: dict, settings: OcrQualitySettings) -> bool:
     return not judgment["passed"]
 
 
+def _excerpt(lines: list[str], limit: int = 120) -> str:
+    return " / ".join(lines)[:limit]
+
+
+def _clipped_word_index(orig_line: str) -> int | None:
+    """Index in the line's words of the fragment word of a clipped line, if any.
+
+    The scan-edge clip signature is a lowercase fragment continuing after
+    terminal punctuation mid-line ('fight. ry did not' — 'ry' is the tail of
+    the clipped word).
+    """
+    match = _MID_LINE_LOWER_RESTART_RE.search(orig_line)
+    if not match:
+        return None
+    # The regex has no capture group; the fragment word begins at the
+    # matched lowercase letter (match.end() - 1).
+    return len(orig_line[: match.end() - 1].split())
+
+
+def _core_token(word: str) -> str:
+    """A token stripped of surrounding punctuation, for signature tests.
+
+    The gate's findall matches junk inside flowing text ('IQI4.' is
+    digit-letter damage); word-level tests must strip the punctuation the
+    sentence glued on, or punctuated junk escapes attribution.
+    """
+    return word.strip(string.punctuation)
+
+
+def _repair_class(
+    orig_span: list[str],
+    new_span: list[str],
+    clipped_index: int | None,
+    span_covers: tuple[int, int],
+    line_cleared: bool,
+) -> str | None:
+    """Damage class a replaced span repairs, or None if it is not attributable.
+
+    A change is defect-attributed only when it removes a token with a
+    deterministic damage signature (#65):
+
+    - ``digit_letter`` — the span is pure junk: EVERY original word in it
+      mixes digits and letters (punctuation stripped, as the gate's own
+      findall sees them) and no replacement word does. A span mixing a
+      junk token with an unattributed edit reverts whole — no partial trust.
+    - ``clipped_line`` — the span contains the clipped fragment word and the
+      repaired line clears the clip signature. The opening region of a
+      clipped line was destroyed, so the reconstruction of that region is
+      accepted and logged (the image-verification pass, #66, can later
+      confirm it against the raster).
+
+    Word substitutions with no signature (the period-spelling 'fix' class)
+    return None and revert.
+    """
+    if orig_span and all(_DIGIT_LETTER_TOKEN_RE.fullmatch(_core_token(w)) for w in orig_span) and not any(
+        _DIGIT_LETTER_TOKEN_RE.fullmatch(_core_token(w)) for w in new_span
+    ):
+        return "digit_letter"
+    if (
+        clipped_index is not None
+        and line_cleared
+        and span_covers[0] <= clipped_index < span_covers[1]
+    ):
+        return "clipped_line"
+    return None
+
+
+def _verify_line(orig_line: str, new_line: str, record: dict) -> str:
+    """Filter one changed line to its defect-attributed word changes."""
+    if orig_line == new_line:
+        return orig_line
+    indent = orig_line[: len(orig_line) - len(orig_line.lstrip())]
+    orig_words = orig_line.split()
+    new_words = new_line.split()
+    if not orig_words or not new_words:
+        if orig_line != new_line:
+            record["reverted"].append({"class": "whitespace_change", "before": _excerpt([orig_line])})
+        return orig_line
+    clipped_index = _clipped_word_index(orig_line)
+    line_cleared = _MID_LINE_LOWER_RESTART_RE.search(new_line) is None
+    matcher = difflib.SequenceMatcher(None, orig_words, new_words, autojunk=False)
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            out.extend(orig_words[i1:i2])
+            continue
+        before = " ".join(orig_words[i1:i2])
+        after = " ".join(new_words[j1:j2])
+        if tag == "replace":
+            cls = _repair_class(orig_words[i1:i2], new_words[j1:j2], clipped_index, (i1, i2), line_cleared)
+            if cls:
+                out.extend(new_words[j1:j2])
+                record["kept"].append({"class": cls, "before": _excerpt([before]), "after": _excerpt([after])})
+                continue
+        out.extend(orig_words[i1:i2])
+        record["reverted"].append({"class": tag, "before": _excerpt([before]), "after": _excerpt([after])})
+    return indent + " ".join(out)
+
+
+def verify_cleanup(
+    page_number: int,
+    ocr_text: str,
+    cleaned_text: str,
+    settings: OcrQualitySettings,
+) -> tuple[str, dict]:
+    """Filter an LLM cleanup result down to defect-attributed repairs (#65).
+
+    Default-revert: the cleaned text is accepted only change-by-change, and a
+    change is kept only when it repairs a site with a deterministic damage
+    signature:
+
+    - ``digit_letter`` — the original word mixed digits and letters (a
+      misread token like '10' for 'no') and the replacement clears it;
+    - ``clipped_line`` — the original line carried a lowercase fragment
+      continuing after terminal punctuation mid-line (the scan-edge clip
+      signature) and the repaired line clears that signature.
+
+    Everything else reverts to the OCR text: word substitutions (the
+    period-spelling 'fix' class), inserted or deleted words, whole-line
+    deletions, hyphen edits (hyphenation is owned downstream by
+    ``cleanup.join_hyphen`` with the full-book corpus), line insertions, and
+    leading-space changes (line structure is the paragraph witness — the
+    com-modities rupture class).
+
+    Returns ``(final_text, record)``; ``record`` is the per-page entry for the
+    package's cleanup-log.json. ``llm_cleanup_verify: false`` restores
+    verbatim acceptance.
+    """
+    record: dict = {"page": page_number, "kept": [], "reverted": [], "structural_revert": False}
+    if not settings.llm_cleanup_verify:
+        record["verify"] = False
+        return cleaned_text, record
+    if cleaned_text == ocr_text:
+        return ocr_text, record
+
+    orig_lines = ocr_text.split("\n")
+    new_lines = cleaned_text.split("\n")
+    opcodes = difflib.SequenceMatcher(None, orig_lines, new_lines, autojunk=False).get_opcodes()
+
+    # Structure invariant: the line sequence is the paragraph witness. A line
+    # insertion, a merge/split of unequal length, or an indent-only edit is
+    # never defect-attributed — the whole page reverts.
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "insert":
+            record["structural_revert"] = True
+            record["reverted"].append({"class": "line_inserted", "before": _excerpt(new_lines[j1:j2])})
+            return ocr_text, record
+        if tag == "replace" and i2 - i1 != j2 - j1:
+            record["structural_revert"] = True
+            record["reverted"].append(
+                {
+                    "class": "line_structure_changed",
+                    "before": _excerpt(orig_lines[i1:i2]),
+                    "after": _excerpt(new_lines[j1:j2]),
+                }
+            )
+            return ocr_text, record
+        if tag == "replace" and i2 - i1 == 1 and j2 - j1 == 1:
+            a, b = orig_lines[i1], new_lines[j1]
+            if a != b and a.lstrip() == b.lstrip():
+                record["structural_revert"] = True
+                record["reverted"].append({"class": "indent_changed", "before": _excerpt([a])})
+                return ocr_text, record
+
+    final_lines: list[str] = []
+    for tag, i1, i2, j1, j2 in opcodes:
+        if tag == "equal":
+            final_lines.extend(orig_lines[i1:i2])
+        elif tag == "delete":
+            # Whole-line deletions (header/footer removal) have no damage
+            # signature: keep the line, record the attempted deletion.
+            for line in orig_lines[i1:i2]:
+                record["reverted"].append({"class": "line_deleted", "before": _excerpt([line])})
+            final_lines.extend(orig_lines[i1:i2])
+        else:  # replace, equal counts (enforced above)
+            for k in range(i2 - i1):
+                final_lines.append(_verify_line(orig_lines[i1 + k], new_lines[j1 + k], record))
+
+    if not record["kept"] and not record["reverted"]:
+        return ocr_text, record
+    return "\n".join(final_lines), record
+
+
+def declare_page_words(page_number: int, text: str, language: str = "eng") -> list[dict]:
+    """Non-dictionary words on a page — declared unknowns (#68).
+
+    Declaration, never repair: a non-dictionary word is either damage the
+    signals cannot see ('almos' for 'almost' — a page-gate-blind, confident
+    misread) or the author's own word (a period spelling, a proper noun).
+    The fidelity report counts them and the image-verification pass (#66)
+    adjudicates; nothing ships silently undeclared.
+
+    Tokenization is dicts.py's (words of two letters or more) — the same
+    measure the dict-share gate uses, one definition. Missing word list:
+    warn once per call and declare nothing — same graceful degradation as
+    the dict-share check.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("word-level declaration unavailable: %s", e)
+        return []
+    lowered = text.lower()
+    counts: dict[str, int] = {}
+    first_pos: dict[str, int] = {}
+    for token in dicts.counted(text):
+        if token in dictionary or token.split("'")[0] in dictionary:
+            continue
+        counts[token] = counts.get(token, 0) + 1
+        if token not in first_pos:
+            first_pos[token] = lowered.find(token)
+    sites: list[dict] = []
+    for token, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        pos = first_pos.get(token, -1)
+        excerpt = ("…" + text[max(0, pos - 40):pos + 50] + "…") if pos >= 0 else token
+        sites.append({"page": page_number, "word": token, "count": count, "excerpt": excerpt})
+    return sites
+
+
+# Minimum length for a fragment-completion candidate (#70): two-letter
+# fragments ('im', 'ery') are overwhelmingly ambiguous noise.
+_MIN_FRAGMENT_LEN = 3
+
+
+def repair_fragment_completions(pages: list[dict], language: str = "eng") -> list[dict]:
+    """Deterministic tail-completion repairs for declared fragment words (#70).
+
+    Consumes the #68 declarations as repair input. An OCR page's
+    non-dictionary word is repaired in place iff:
+
+      1. it is a strict prefix of EXACTLY ONE dictionary word — ambiguity
+         means no repair, ever ('scon' stays declared next to six
+         candidates while the print says 'soon');
+      2. the completion is witnessed in the book's own parsed text (the
+         author demonstrably uses it — 'almos' completes to 'almost',
+         which occurs nine times in the same book);
+      3. the fragment is at least _MIN_FRAGMENT_LEN letters.
+
+    Tail-extension only — the clipped-word damage shape. Substitutions
+    (slaid -> laid) are not completions and stay unattributable forever.
+    Only OCR pages are touched (text-layer pages carry the book's own
+    typeset text — a non-dictionary word there is the author's, not
+    damage). Text-layer and OCR pages both contribute to the witness
+    corpus.
+
+    Returns per-page records for the package fidelity log; each repaired
+    page's "text" is updated in place and its "fragment_repairs" set.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("fragment completion unavailable: %s", e)
+        return []
+    sorted_words = sorted(dictionary)
+    corpus_words = set()
+    for p in pages:
+        corpus_words.update(dicts.counted(p.get("text", "")))
+
+    def _unique_completion(token: str) -> str | None:
+        found: list[str] = []
+        i = bisect.bisect_left(sorted_words, token)
+        while i < len(sorted_words) and sorted_words[i].startswith(token):
+            word = sorted_words[i]
+            if len(word) > len(token):
+                found.append(word)
+                if len(found) > 1:
+                    return None
+            i += 1
+        return found[0] if len(found) == 1 else None
+
+    records: list[dict] = []
+    for p in pages:
+        # Text-layer pages are the book's own typeset text — never repaired.
+        if not p.get("ocr_quality"):
+            continue
+        text = p.get("text", "")
+        if not text:
+            continue
+        counts: dict[str, int] = {}
+        for token in dicts.counted(text):
+            if len(token) < _MIN_FRAGMENT_LEN or token in dictionary or token.split("'")[0] in dictionary:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+        repairs: dict[str, str] = {}
+        for token in counts:
+            completion = _unique_completion(token)
+            if completion and completion in corpus_words:
+                repairs[token] = completion
+        if not repairs:
+            p["fragment_repairs"] = None
+            continue
+        for token, completion in repairs.items():
+            pattern = re.compile(r"\b" + re.escape(token) + r"\b", re.IGNORECASE)
+
+            def _sub(match, completion=completion):
+                found = match.group(0)
+                return completion.capitalize() if found[:1].isupper() else completion
+
+            text = pattern.sub(_sub, text)
+            records.append(
+                {
+                    "page": p.get("page"),
+                    "word": token,
+                    "completion": completion,
+                    "count": counts.get(token, 0),
+                }
+            )
+        p["text"] = text
+        p["fragment_repairs"] = [r for r in records if r.get("page") == p.get("page")]
+    return records
+
+
+# Minimum total length for a joined-words candidate (#72): the observed
+# class is five letters and up ('didso', 'anend', 'himnoharm').
+_MIN_JOINED_LEN = 5
+
+
+def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
+    """Deterministic missing-space repairs for joined dictionary words (#72).
+
+    A declared (non-dictionary) word on an OCR page is repaired in place iff
+    it has EXACTLY ONE book-witnessed full decomposition into dictionary
+    words — every segment at least two letters and witnessed in the book's
+    own parsed text:
+
+        'didso' -> did | so        'anend' -> an | end
+        'himnoharm' -> him | no | harm
+
+    The witness check PRUNES candidate decompositions before uniqueness is
+    judged: dictionary word-lists carry junk fragments ('ane', 'nd'), and a
+    split the book itself never writes ('anend' -> ane|nd) must not veto a
+    true repair (an|end). Two BOOK-WITNESSED decompositions still refuses,
+    ever ('formore' splits for|more AND form|ore — it stays declared).
+    Words that do not decompose (proper nouns, substitution-shaped damage
+    like 'scon') stay declared for #66's image pass. Only OCR pages are
+    touched; text-layer pages are the book's own typeset text. Returns
+    per-page records; each repaired page's "text" is updated in place and
+    "joined_repairs" set.
+    """
+    from worker.prep import dicts
+
+    try:
+        dictionary = dicts.words(language)
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("joined-word repair unavailable: %s", e)
+        return []
+    corpus_words = set()
+    for p in pages:
+        corpus_words.update(dicts.counted(p.get("text", "")))
+
+    def _unique_decomposition(token: str) -> list[str] | None:
+        memo: dict[int, list[list[str]]] = {}
+
+        def decompose(start: int) -> list[list[str]]:
+            if start in memo:
+                return memo[start]
+            results: list[list[str]] = []
+            if start == len(token):
+                results = [[]]
+            else:
+                for end in range(start + 2, len(token) + 1):
+                    if token[start:end] in dictionary:
+                        for rest in decompose(end):
+                            results.append([token[start:end]] + rest)
+            memo[start] = results
+            return results
+
+        # Enumerate EVERYTHING before pruning: a truncated enumeration
+        # (stop at two ways) lets an unwitnessed garbage split that happens
+        # to enumerate first veto a true repair that comes later — exactly
+        # the 'himnoharm' defect. The cap only guards pathological
+        # word-lists: 64 decompositions of one token means refuse.
+        all_ways = decompose(0)
+        if len(all_ways) > 64:
+            return None
+        ways = [
+            w
+            for w in all_ways
+            if len(w) > 1 and all(seg in corpus_words for seg in w)
+        ]
+        if len(ways) == 1:
+            return ways[0]
+        return None
+
+    records: list[dict] = []
+    for p in pages:
+        # Text-layer pages are the book's own typeset text — never repaired.
+        if not p.get("ocr_quality"):
+            continue
+        text = p.get("text", "")
+        if not text:
+            continue
+        counts: dict[str, int] = {}
+        for token in dicts.counted(text):
+            if len(token) < _MIN_JOINED_LEN or token in dictionary or token.split("'")[0] in dictionary:
+                continue
+            counts[token] = counts.get(token, 0) + 1
+        repairs: dict[str, list[str]] = {}
+        for token in counts:
+            parts = _unique_decomposition(token)
+            if parts:
+                repairs[token] = parts
+        if not repairs:
+            p["joined_repairs"] = None
+            continue
+        for token, parts in repairs.items():
+            replacement = " ".join(parts)
+            pattern = re.compile(r"\b" + re.escape(token) + r"\b", re.IGNORECASE)
+
+            def _sub(match, replacement=replacement):
+                found = match.group(0)
+                return replacement.capitalize() if found[:1].isupper() else replacement
+
+            text = pattern.sub(_sub, text)
+            records.append(
+                {
+                    "page": p.get("page"),
+                    "word": token,
+                    "words": parts,
+                    "count": counts.get(token, 0),
+                }
+            )
+        p["text"] = text
+        p["joined_repairs"] = [r for r in records if r.get("page") == p.get("page")]
+    return records
+
+
 # How each gate reason is explained to the cleanup model. A generic
 # 'fix obvious OCR errors' does not engage the model: at 27B the damage
 # passes through unchanged. With the damage CLASS described (verified
@@ -213,14 +651,14 @@ Mean confidence: {quality['confidence']:.1f}%
 Dictionary share: {quality['dict_share']:.1%}
 {repairs_text}
 Rules:
-- Fix obvious OCR errors (misrecognized characters, broken words, hyphenation artifacts)
-- Remove page headers, footers, page numbers, and running titles
-- Fix broken hyphens at line ends (rejoin words split across lines)
-- Preserve the original meaning and wording as much as possible
-- Do NOT add content that isn't in the original
+- Repair ONLY the damaged sites described above. Every other word, spelling,
+  and punctuation must remain EXACTLY as printed, even if it looks unusual —
+  period spellings and proper nouns are the author's; do not modernize them.
+- Do NOT remove or reorder lines; headers, footers, and hyphenation are
+  repaired by later deterministic stages, not here.
 - CRITICAL: preserve each line's leading spaces EXACTLY as given and keep the
   same line breaks — leading spaces encode paragraph indentation. Do not
-  reflow, re-wrap, or merge lines beyond repairing hyphenated words.
+  reflow, re-wrap, or merge lines.
 - Return ONLY the cleaned text, no explanations
 
 OCR text:
@@ -256,17 +694,14 @@ Cleaned text:"""
         return ocr_text
 
 
-_DEFAULT_SYSTEM_PROMPT = """You are an OCR text cleanup specialist. Your job is to fix OCR errors in extracted book text while preserving the original meaning and wording.
-
-Common OCR errors to fix:
-- Misrecognized characters (e.g., '1' instead of 'l', '0' instead of 'O', 'rn' instead of 'm')
-- Broken hyphens at line ends (rejoin words split across lines)
-- Random page breaks and headers/footers (remove page numbers, running titles)
-- Garbage characters and symbols that don't belong
-- Spacing errors (missing or extra spaces)
+_DEFAULT_SYSTEM_PROMPT = """You are an OCR text cleanup specialist. Repair ONLY the damaged sites the
+user message describes. Every other word, spelling, and punctuation must
+remain EXACTLY as printed, even if it looks unusual — period spellings and
+proper nouns are the author's; never modernize them.
 
 Rules:
-- Preserve the original wording and meaning as much as possible
+- Do NOT remove or reorder lines; headers, footers, and hyphenation are
+  repaired by later deterministic stages, not here
+- Preserve the original meaning and wording
 - Do NOT add content that isn't in the original
-- Do NOT rewrite or paraphrase — only fix OCR artifacts
 - Return ONLY the cleaned text, no explanations or markdown"""

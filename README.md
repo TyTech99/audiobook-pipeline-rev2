@@ -86,6 +86,17 @@ sudo docker ps --filter name=audiobook-supervisor
 
 For multi-host installs (separate coordinator and nodes), see [deploy/README.md](deploy/README.md).
 
+### Updating code
+
+After changing code, deploy it with the CLI instead of a manual rsync:
+
+```bash
+sudo PYTHONPATH=. python3 -m cli coordinator update --source .
+sudo PYTHONPATH=. python3 -m cli node update --source .
+```
+
+Both commands sync into the layout the build actually reads (the coordinator and supervisor packages are nested same-named dirs — a flat rsync silently deploys nothing), rebuild, force-recreate, and verify the running containers use the freshly built images. See [deploy/README.md](deploy/README.md#updating-code-on-an-installed-host).
+
 ## Config
 
 ### Operator key
@@ -290,6 +301,9 @@ Output of the prep stage. A directory containing:
 - `page-ledger.json`: page-by-page accounting of the source document
 - `metadata.json`: extracted and enriched metadata
 - `llm-analysis.json`: subject summary, tone analysis, style recommendations
+- `cleanup-log.json`: every LLM cleanup change kept or reverted, with its justification (#65)
+- `fidelity-report.json`: per-book cleanup fidelity — kept by class, reverted, fragment completions, joined words, low-confidence sites, declared word sites, 0 unattributed (#65, #68, #70, #72)
+- `ocr-quality.json`: per-page OCR gate verdicts (confidence, dict-share, reasons) for every OCR page (#68)
 - `manifest.json`: package manifest with validation status
 - `cover.jpg`: cover art
 

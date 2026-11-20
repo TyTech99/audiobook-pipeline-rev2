@@ -506,6 +506,330 @@ def test_cleanup_prompt_carries_targeted_repair_instructions():
     assert "specific damage" not in captured["user"]
 
 
+def test_verify_cleanup_keeps_only_defect_attributed_repairs():
+    # Issue #65: default-revert. A change survives only when it repairs a
+    # site with a deterministic damage signature.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+
+    # digit-letter misread: '1x' (mixed digit+letter junk) -> 'no' — kept.
+    # A bare all-digit token ('10') is deliberately NOT attributable: text
+    # alone cannot tell it from a real numeral ('1940') — that class waits
+    # for the image-verification pass (#66).
+    text, record = verify_cleanup(22, "He said 1x other things.", "He said no other things.", settings)
+    assert text == "He said no other things."
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+    assert record["reverted"] == []
+
+    # clipped-line reconstruction: 'ry did not' -> 'Germany did not' — kept.
+    text, record = verify_cleanup(
+        22, "a victory. ry did not know", "a victory. Germany did not know", settings
+    )
+    assert text == "a victory. Germany did not know"
+    assert [c["class"] for c in record["kept"]] == ["clipped_line"]
+
+    # period-spelling 'fix': no damage signature — reverted whole.
+    text, record = verify_cleanup(31, "He slaid down his pen.", "He laid down his pen.", settings)
+    assert text == "He slaid down his pen."
+    assert record["kept"] == []
+    assert record["reverted"] and record["reverted"][0]["class"] == "replace"
+
+    # invented word: sameness -> sameliness — reverted.
+    text, record = verify_cleanup(28, "the sameness of it all", "the sameliness of it all", settings)
+    assert text == "the sameness of it all"
+    assert record["kept"] == []
+
+    # inserted word jitter ('a her close on a million') — reverted.
+    text, record = verify_cleanup(30, "her close on a million", "a her close on a million", settings)
+    assert text == "her close on a million"
+    assert record["kept"] == []
+
+    # Punctuated junk keeps its attribution ('IQI4.' is digit-letter damage
+    # with a sentence period glued on) — the gate's findall sees it; the
+    # word-level test must strip punctuation the same way.
+    text, record = verify_cleanup(41, "the year IQI4. was one", "the year 1914. was one", settings)
+    assert text == "the year 1914. was one"
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+    # Comma-glued junk likewise: '1g19,' -> '1919,'.
+    text, record = verify_cleanup(41, "in 1g19, the war ended", "in 1919, the war ended", settings)
+    assert text == "in 1919, the war ended"
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+    # Pure digits stay unattributable even punctuated — numeral ambiguity (#66).
+    text, record = verify_cleanup(41, "he said 10. other", "he said no. other", settings)
+    assert text == "he said 10. other"
+    assert record["kept"] == []
+
+
+def test_declare_page_words_flags_non_dictionary_words(tmp_path, monkeypatch):
+    # Issue #68: page-gate-blind misreads ('almos') and the author's rare
+    # words ('slaid') are DECLARED — counted in the fidelity report, never
+    # silently shipped, never repaired here (#66 adjudicates).
+    from worker.prep.ocr_cleanup import declare_page_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "there\nare\nsome\nwho\nfaced\nby\nsecond\nworld\nwar\nin\n"
+        "generation\nfeel\nthat\nit\nmight\nhave\nbeen\nbetter\nthe\nof\n"
+        "author\naccount\nwas\nalmost\ncomplete\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    text = (
+        "There are some who, faced by a second world war in a generation, almos feel "
+        "that it might have been better. The author's account of 1940 was almost complete."
+    )
+    sites = declare_page_words(8, text, "eng")
+    words = {s["word"]: s for s in sites}
+    assert "almos" in words
+    assert words["almos"]["page"] == 8
+    assert words["almos"]["count"] == 1
+    assert "almos" in words["almos"]["excerpt"]
+    # Dictionary words, the apostrophe word ('author's' via its stem), and
+    # pure-number tokens ('1940' — dicts.py's WORD_RE requires letters) are
+    # never declared.
+    assert "author's" not in words
+    assert "1940" not in words
+    assert "almost" not in words
+    # Most-frequent first: a word appearing twice sorts ahead.
+    (dictdir / "american-english-large").write_text(
+        "the\nof\nwar\npeace\nworld\nsecond\ngeneration\nsome\nwho\nfaced\n"
+        "almos\nfeel\nthat\nit\nmight\nhave\nbeen\nbetter\nthere\nare\n"
+        "author\naccount\nwas\nalmost\ncomplete\n"
+    )
+    text2 = "Slaid aside, slaid again: the slaid sword of 1940." \
+            " There are some who, faced by a second world war in a generation, almos feel peace."
+    sites2 = declare_page_words(8, text2, "eng")
+    assert sites2[0]["word"] == "slaid" and sites2[0]["count"] == 3
+    assert any(s["word"] == "almos" for s in sites2)
+
+
+def test_declare_page_words_degrades_gracefully_without_word_list(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import declare_page_words
+
+    empty = tmp_path / "no-dicts"
+    empty.mkdir()
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(empty))
+    assert declare_page_words(8, "any text at all", "eng") == []
+
+
+def test_repair_fragment_completions_unique_witnessed(tmp_path, monkeypatch):
+    # Issue #70: almos -> almost is applied deterministically when the
+    # completion is dictionary-unique and book-witnessed; ambiguous 'scon'
+    # stays; text-layer pages are never touched.
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "the\nof\na\nin\nit\nwar\nfeel\nwho\nsome\nfaced\nby\nsecond\nworld\ngeneration\n"
+        "there\nare\ntwice\nthey\nmight\nhave\nknown\nbetter\nremains\ntext\nlayer\npage\nwith\naside\n"
+        "almost\npeace\nsconce\nscone\nsoon\nslaid\nimp\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    pages = [
+        {
+            "page": 8,
+            "ocr_quality": {"passed": True},
+            "text": "There are some who, faced by a second world war in a generation, almos feel it. Almos twice.",
+        },
+        {"page": 9, "ocr_quality": {"passed": True}, "text": "they might almost have known better. the scon remains."},
+        {"page": 10, "text": "a text layer page with almos aside"},
+    ]
+    records = repair_fragment_completions(pages, "eng")
+    assert records == [
+        {"page": 8, "word": "almos", "completion": "almost", "count": 2},
+    ]
+    assert pages[0]["text"] == (
+        "There are some who, faced by a second world war in a generation, almost feel it. Almost twice."
+    )
+    assert pages[0]["fragment_repairs"] == records
+    # ambiguity means no repair, ever — the print said 'soon'
+    assert "the scon remains." in pages[1]["text"]
+    assert pages[1].get("fragment_repairs") in (None, [])
+    # text-layer pages are the book's own typeset text — never repaired
+    assert "almos" in pages[2]["text"]
+
+
+def test_repair_fragment_completions_requires_book_witness(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text("the\nof\npeace\nworld\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    # 'peac' has a unique dictionary completion 'peace', but the author
+    # never uses 'peace' anywhere in the parsed text — no witness, no repair.
+    pages = [{"page": 1, "ocr_quality": {"passed": True}, "text": "the peac of the world"}]
+    assert repair_fragment_completions(pages, "eng") == []
+    assert "peac" in pages[0]["text"]
+
+
+def test_repair_fragment_completions_min_length_guard(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_fragment_completions
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text("the\nan\nit\nof\nappeared\nimp\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    # 'im' is a unique dictionary completion of... itself? 'im' has a unique
+    # longer completion 'imp', witnessed — but two-letter fragments are
+    # excluded by the minimum-length guard.
+    pages = [
+        {"page": 1, "ocr_quality": {"passed": True}, "text": "the im of it"},
+        {"page": 2, "ocr_quality": {"passed": True}, "text": "an imp appeared"},
+    ]
+    assert repair_fragment_completions(pages, "eng") == []
+    assert "the im of it" == pages[0]["text"]
+
+
+def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
+    # Issue #72: joined dictionary words repair deterministically when the
+    # decomposition is unique and every segment is book-witnessed; ambiguity
+    # refuses; text-layer pages are never touched.
+    from worker.prep.ocr_cleanup import repair_joined_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
+        "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
+        "for\nmore\nform\nore\n"
+        # junk fragments that real word-lists carry: dictionary-present but
+        # never book-witnessed — they must NOT veto the true splits
+        # (regression: the pre-witness-pruning rule refused anend/himnoharm
+        # on exactly these garbage decompositions)
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    pages = [
+        # A corpus page that witnesses every repair segment as the author's
+        # own usage — the witness requirement is part of the rule — and
+        # witnesses the ambiguity words so 'formore' is refused by
+        # AMBIGUITY, not by missing witnesses.
+        {
+            "page": 5,
+            "ocr_quality": {"passed": True},
+            "text": "so did an end come with no harm to him. the form of ore was more for them.",
+        },
+        {"page": 18, "ocr_quality": {"passed": True}, "text": "they might have didso. better."},
+        {"page": 6, "ocr_quality": {"passed": True}, "text": "will one day come to anend."},
+        {"page": 21, "ocr_quality": {"passed": True}, "text": "they did himnoharm. and knew it."},
+        {"page": 22, "ocr_quality": {"passed": True}, "text": "they formore it."},
+        {"page": 23, "text": "a text layer page with didso aside"},
+    ]
+    records = repair_joined_words(pages, "eng")
+    by_word = {r["word"]: r for r in records}
+    assert set(by_word) == {"didso", "anend", "himnoharm"}
+    assert by_word["didso"]["words"] == ["did", "so"]
+    assert by_word["himnoharm"]["words"] == ["him", "no", "harm"]
+    assert pages[1]["text"] == "they might have did so. better."
+    assert pages[2]["text"] == "will one day come to an end."
+    assert pages[3]["text"] == "they did him no harm. and knew it."
+    # 'formore' has TWO valid decompositions (for|more, form|ore) — refused.
+    assert "they formore it." == pages[4]["text"]
+    # text-layer pages are the book's own typeset text — never repaired.
+    assert "didso" in pages[5]["text"]
+    # three-way join on a capitalized occurrence keeps its capital
+    (dictdir / "american-english-large").write_text(
+        "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
+        "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
+        "for\nmore\nform\nore\n"
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
+    )
+    pages2 = [
+        {"page": 5, "ocr_quality": {"passed": True}, "text": "so did an end come with no harm to him."},
+        {"page": 21, "ocr_quality": {"passed": True}, "text": "Himnoharm. they knew."},
+    ]
+    records2 = repair_joined_words(pages2, "eng")
+    assert pages2[1]["text"] == "Him no harm. they knew."
+    assert records2[0]["words"] == ["him", "no", "harm"]
+
+
+def test_repair_joined_words_requires_book_witness(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_joined_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    # 'sooth' decomposes uniquely into so|oth — but 'oth' never occurs in
+    # the book's parsed text, so no witness and no repair.
+    (dictdir / "american-english-large").write_text("the\nof\nso\noth\nwar\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    pages = [{"page": 1, "ocr_quality": {"passed": True}, "text": "the sooth of war"}]
+    assert repair_joined_words(pages, "eng") == []
+    assert "sooth" in pages[0]["text"]
+
+
+def test_verify_cleanup_reverts_structural_damage():
+    # Issue #65: the line sequence is the paragraph witness.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+
+    # com-modities rupture: a line inserted at the hyphen — whole page reverts.
+    orig = "trade in com-\nmodities and goods"
+    ruptured = "trade in com-\nmodities and goods\nextra line appeared"
+    text, record = verify_cleanup(35, orig, ruptured, settings)
+    assert text == orig
+    assert record["structural_revert"] is True
+
+    # indent-only edit: paragraph structure changed — whole page reverts.
+    orig = "   first line\nsecond line"
+    indented = "       first line\nsecond line"
+    text, record = verify_cleanup(35, orig, indented, settings)
+    assert text == orig
+    assert record["structural_revert"] is True
+
+    # hyphen merge (2 lines -> 1): owned downstream by join_hyphen — reverted.
+    text, record = verify_cleanup(
+        35, "trade in com-\nmodities and goods", "trade in commodities and goods", settings
+    )
+    assert text == "trade in com-\nmodities and goods"
+    assert record["kept"] == []
+
+    # whole-line deletion (header removal): no damage signature — line kept.
+    orig = "UNFINISHED VICTORY\nthe body text of the page"
+    trimmed = "the body text of the page"
+    text, record = verify_cleanup(35, orig, trimmed, settings)
+    assert text == orig
+    assert any(c["class"] == "line_deleted" for c in record["reverted"])
+
+
+def test_verify_cleanup_flag_off_restores_verbatim_acceptance():
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings(llm_cleanup_verify=False)
+    cleaned = "He laid down his pen."
+    text, record = verify_cleanup(31, "He slaid down his pen.", cleaned, settings)
+    assert text == cleaned
+    assert record.get("verify") is False
+
+
+def test_verify_cleanup_mixed_changes_keep_only_the_attributed_one():
+    # A span mixing a genuine junk-token repair with an unattributed verb
+    # substitution reverts as a unit — no partial trust. The refused unit is
+    # recorded; the image-verification pass (#66) can recover such sites.
+    from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
+
+    settings = OcrQualitySettings()
+    orig = "He said 1x other things."
+    cleaned = "He stated no other things."
+    text, record = verify_cleanup(22, orig, cleaned, settings)
+    assert text == "He said 1x other things."
+    assert record["kept"] == []
+    assert record["reverted"] and record["reverted"][0]["class"] == "replace"
+
+    # A pure junk span repairs cleanly even with neighbors untouched.
+    text, record = verify_cleanup(22, "He said 1x and 2y tokens.", "He said no and 2y tokens.", settings)
+    assert text == "He said no and 2y tokens."
+    assert [c["class"] for c in record["kept"]] == ["digit_letter"]
+
+
 def test_prep_worker_uses_analyzer(tmp_path):
     from worker.prep.worker import PrepWorker
 

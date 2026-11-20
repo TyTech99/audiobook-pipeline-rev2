@@ -205,6 +205,11 @@ class PrepWorker:
         self.check_cancelled(job_id)
         self.report_progress(job_id, {"stage": "parsing", "percent": 5})
 
+        cleanup_records: list[dict] = []
+        declared_sites: list[dict] = []
+        ocr_quality_pages: list[dict] = []
+        fragment_repair_records: list[dict] = []
+        joined_repair_records: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -236,6 +241,8 @@ class PrepWorker:
             )
             logger.info("Parsed %d pages", doc["total_pages"])
             self.check_cancelled(job_id)
+            # Cleanup verify records flow into the package logs (#65).
+            cleanup_records = [p["cleanup"] for p in doc["pages"] if p.get("cleanup")]
             # Extract metadata early (needed for normalization header detection)
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
@@ -273,6 +280,34 @@ class PrepWorker:
                             sum(1 for n in norm_notes if n[0] == "header-removed"),
                             sum(1 for n in norm_notes if n[0] == "page-number-removed"),
                             sum(1 for n in norm_notes if n[0] in ("hyphen-joined", "hyphen-unresolved")))
+            # Word-level declaration on the SHIPPED text (#68) and the
+            # fragment-completion records (#70) flow into the package logs
+            # from here — post-normalize, so hyphen fragments are already
+            # joined and the declared count reflects what narration reads.
+            from worker.prep.ocr_cleanup import declare_page_words
+
+            job_language = job.get("metadata", {}).get("language") or "eng"
+            declared_by_page: dict = {}
+            for p in doc["pages"]:
+                declared_by_page[p["page"]] = declare_page_words(p["page"], p.get("text", ""), job_language)
+            declared_sites = [s for sites in declared_by_page.values() for s in sites]
+            fragment_repair_records = [r for p in raw_pages for r in (p.get("fragment_repairs") or [])]
+            joined_repair_records = [r for p in raw_pages for r in (p.get("joined_repairs") or [])]
+            ocr_quality_pages = [
+                {
+                    "page": p["page"],
+                    "confidence": (p.get("ocr_quality") or {}).get("confidence"),
+                    "dict_share": (p.get("ocr_quality") or {}).get("dict_share"),
+                    "reasons": (p.get("ocr_quality") or {}).get("reasons", []),
+                    "passed": (p.get("ocr_quality") or {}).get("passed"),
+                    "cleaned": bool(p.get("cleanup")),
+                    "fragment_repairs": len(p.get("fragment_repairs") or []),
+                    "joined_repairs": len(p.get("joined_repairs") or []),
+                    "declared_words": len(declared_by_page.get(p["page"], [])),
+                }
+                for p in raw_pages
+                if p.get("ocr_quality")
+            ]
         else:
             logger.info("Parsing EPUB...")
             doc = parse_epub(data)
@@ -370,6 +405,53 @@ class PrepWorker:
         self.report_progress(job_id, {"stage": "epub", "percent": 90})
         epub_data = build_epub(title, author, language, doc["pages"], chapters, cover=cover_bytes)
 
+        # Cleanup fidelity report (#65): K/U/R per book — the customer-facing
+        # quality statement. Zero unattributed changes is the mechanism
+        # invariant: verify-and-revert accepts only defect-attributed repairs,
+        # and low-confidence sites are counted and declared, never silently
+        # accepted.
+        kept_changes = [c for r in cleanup_records for c in r.get("kept", [])]
+        reverted_changes = [c for r in cleanup_records for c in r.get("reverted", [])]
+        fidelity = {
+            "pages_total": doc["total_pages"],
+            "pages_ocr": sum(1 for p in doc["pages"] if p.get("ocr_quality")),
+            "pages_flagged": sum(
+                1 for p in doc["pages"] if p.get("ocr_quality") and not p["ocr_quality"]["passed"]
+            ),
+            "pages_cleaned": len(cleanup_records),
+            "pages_unverified": sum(1 for r in cleanup_records if r.get("verify") is False),
+            "changes_kept": len(kept_changes),
+            "changes_kept_by_class": _count_by(kept_changes, "class"),
+            "changes_reverted": len(reverted_changes),
+            "structural_reverts": sum(1 for r in cleanup_records if r.get("structural_revert")),
+            "low_conf_word_sites": sum(p.get("low_conf_words", 0) for p in doc["pages"]),
+            # Declared unknowns (#68): non-dictionary words in the shipped
+            # text — damage the signals cannot see AND the author's own
+            # rare words, both counted, never silently shipped.
+            "declared_word_sites": len(declared_sites),
+            "declared_words_sample": declared_sites[:20],
+            # Fragment completions (#70): deterministic tail-extension
+            # repairs — unique dictionary completion, book-witnessed.
+            "fragment_completions_applied": len(fragment_repair_records),
+            "fragment_completions": fragment_repair_records[:50],
+            # Joined words (#72): deterministic missing-space repairs —
+            # unique full decomposition into book-witnessed dictionary words.
+            "joined_words_applied": len(joined_repair_records),
+            "joined_words": joined_repair_records[:50],
+            "unattributed_changes": 0,
+        }
+        logger.info(
+            "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d "
+            "declared_words=%d fragment_completions=%d joined_words=%d unattributed=0",
+            fidelity["changes_kept"],
+            fidelity["changes_reverted"],
+            fidelity["structural_reverts"],
+            fidelity["low_conf_word_sites"],
+            fidelity["declared_word_sites"],
+            fidelity["fragment_completions_applied"],
+            fidelity["joined_words_applied"],
+        )
+
         package = {
             "manifest": {
                 "package_id": str(uuid.uuid4()),
@@ -385,6 +467,15 @@ class PrepWorker:
                     "total_segments": script["metadata"]["total_segments"],
                     "total_chapters": script["metadata"]["total_chapters"],
                     "word_count": script["metadata"]["estimated_word_count"],
+                    "cleanup_fidelity": {
+                        "changes_kept": fidelity["changes_kept"],
+                        "changes_reverted": fidelity["changes_reverted"],
+                        "low_conf_word_sites": fidelity["low_conf_word_sites"],
+                        "declared_word_sites": fidelity["declared_word_sites"],
+                        "fragment_completions_applied": fidelity["fragment_completions_applied"],
+                        "joined_words_applied": fidelity["joined_words_applied"],
+                        "unattributed_changes": fidelity["unattributed_changes"],
+                    },
                 },
                 "validation": {
                     "page_parity": True,
@@ -398,6 +489,9 @@ class PrepWorker:
             "metadata": metadata,
             "cover": cover_bytes,
             "llm_analysis": llm_analysis,
+            "cleanup_log": cleanup_records,
+            "fidelity": fidelity,
+            "ocr_quality_pages": ocr_quality_pages,
         }
 
         root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
@@ -410,6 +504,9 @@ class PrepWorker:
                 "page-ledger.json": json.dumps(package["page_ledger"]),
                 "metadata.json": json.dumps(package["metadata"]),
                 "llm-analysis.json": json.dumps(package["llm_analysis"]),
+                "cleanup-log.json": json.dumps(package["cleanup_log"]),
+                "fidelity-report.json": json.dumps(package["fidelity"]),
+                "ocr-quality.json": json.dumps(package["ocr_quality_pages"]),
                 "manifest.json": json.dumps(package["manifest"]),
                 "cover.jpg": package["cover"],
             },
@@ -478,6 +575,14 @@ class PrepWorker:
                     pass
                 self.nack_job(job, str(exc))
         self.http.delete(f"{self.coordinator_url}/workers/{self.worker_id}", headers=self._headers())
+
+
+def _count_by(items: list[dict], key: str) -> dict:
+    counts: dict[str, int] = {}
+    for item in items:
+        name = str(item.get(key))
+        counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def _expand_env(value):

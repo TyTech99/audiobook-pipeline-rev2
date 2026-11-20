@@ -80,7 +80,7 @@ After editing, restart the prep worker container for changes to take effect.
 ## Known limitations
 
 - **Roman numeral page numbers in headers**: Headers like "HISTORIAN'S TESTAMENT XI" where the roman numeral changes per page are not yet detected as running headers. See issue #29.
-- **OCR errors**: Normalization cannot fix OCR misreads (e.g., "slaid" for "laid"). Use the LLM cleanup stage for that.
+- **OCR errors**: Normalization cannot fix OCR misreads. The LLM cleanup stage attempts repairs, but verify-and-revert (#65) keeps only defect-attributed ones — a word like "slaid" (period spelling, no damage signature) must NOT be "fixed" and reverts by design; clipped-line reconstructions and digit-letter junk tokens repair with attribution. Check `cleanup-log.json` / `fidelity-report.json` per book.
 - **Two-column layouts**: Paragraph detection assumes single-column text. Two-column pages may need manual review.
 
 ## Related files

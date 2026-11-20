@@ -1,9 +1,12 @@
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
+import cli.flows as flows
 from cli.flows import (
+    EXIT_FAILED,
     EXIT_OK,
     EXIT_PRECONDITION,
     EXIT_REBOOT,
@@ -118,16 +121,236 @@ def test_node_apply_restarts_only_when_hours_change():
     assert host.restarts == ["audiobook-supervisor.service"]
 
 
-def test_update_keeps_env_and_copies_marker(tmp_path: Path):
+def _update_source_tree(tmp_path: Path) -> Path:
+    """A minimal repo-like checkout for update_role tests."""
+    (tmp_path / "cli").mkdir()
+    (tmp_path / "cli" / "flows.py").write_text("# cli\n")
+    (tmp_path / "coordinator").mkdir()
+    (tmp_path / "coordinator" / "main.py").write_text("MAIN = 'new'\n")
+    (tmp_path / "supervisor").mkdir()
+    (tmp_path / "supervisor" / "__init__.py").write_text("")
+    (tmp_path / "supervisor" / "supervisor.py").write_text("SUPERVISOR = 'new'\n")
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / "__init__.py").write_text("")
+    (tmp_path / "worker" / "prep.py").write_text("PREP = 'new'\n")
+    (tmp_path / "recipe").mkdir()
+    (tmp_path / "recipe" / "voice.txt").write_text("voice\n")
+    (tmp_path / "deploy").mkdir()
+    for name in (
+        "coordinator.Dockerfile",
+        "supervisor.Dockerfile",
+        "worker-prep.Dockerfile",
+        "worker-tts.Dockerfile",
+        "recipe-michael.Dockerfile",
+        "probe.Dockerfile",
+        "build-images.sh",
+    ):
+        (tmp_path / "deploy" / name).write_text(f"# {name}\n")
+    return tmp_path
+
+
+def _fake_docker_run(calls: list, *, container_image: str, built_image: str):
+    """Record deploy commands and answer the docker inspect/images queries."""
+
+    def run(argv):
+        calls.append(argv)
+        if "inspect" in argv and "--format" in argv:
+            image = container_image if argv[1] == "inspect" else built_image
+            return subprocess.CompletedProcess(argv, 0, stdout=image + "\n", stderr="")
+        if "ps" in argv and "-q" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout="container-id\n", stderr="")
+        if "images" in argv and "-q" in argv:
+            return subprocess.CompletedProcess(argv, 0, stdout=built_image + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    return run
+
+
+def test_update_coordinator_deploys_the_nested_package_and_verifies(monkeypatch, tmp_path):
     host = MemoryHost()
     install_coordinator(host, coordinator_state(), [])
-    before = host.read(linux_paths()["coordinator_env"])
-    (tmp_path / "MARKER").write_text("build-7")
-    result = update_role(host, str(tmp_path), "coordinator", [])
+    prefix = linux_paths()["coordinator_prefix"]
+    compose = prefix + "/docker-compose.dev.yml"
+    # Flat-rsync residue from the #53 incident: a stale copy at the top level.
+    host.write(prefix + "/main.py", "MAIN = 'stale'\n")
+    host.write(prefix + "/config/coordinator.yaml", "operator: edited\n")
+    before_env = host.read(linux_paths()["coordinator_env"])
+    before_compose = host.read(compose)
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    calls: list = []
+    monkeypatch.setattr(
+        flows, "_run",
+        _fake_docker_run(calls, container_image="sha256:" + "a" * 64, built_image="a" * 64),
+    )
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "coordinator", messages)
+    assert result["code"] == EXIT_OK and result["changed"] is True
+    # The package landed in the nested dir the build context reads; the flat
+    # residue is untouched (its cleanup is a separate decision).
+    assert host.read(prefix + "/coordinator/main.py") == "MAIN = 'new'\n"
+    assert host.read(prefix + "/main.py") == "MAIN = 'stale'\n"
+    assert host.read(prefix + "/REVISION") == "rev" + "a" * 40
+    assert host.read(prefix + "/coordinator.Dockerfile") == "# coordinator.Dockerfile\n"
+    # Runtime state owned by install/apply is untouched.
+    assert host.read(linux_paths()["coordinator_env"]) == before_env
+    assert host.read(compose) == before_compose
+    assert host.read(prefix + "/config/coordinator.yaml") == "operator: edited\n"
+    assert prefix + "/MARKER" not in host.files
+    assert any("coordinator updated" in line for line in messages)
+    # Build, force-recreate, then image-verify — in that order (#53).
+    build_cmd = ["docker", "compose", "-f", compose, "build", "coordinator"]
+    up_cmd = ["docker", "compose", "-f", compose, "up", "-d", "--force-recreate", "coordinator"]
+    assert build_cmd in calls
+    assert up_cmd in calls
+    assert calls.index(up_cmd) > calls.index(build_cmd)
+    assert any("inspect" in argv and argv[1] == "inspect" for argv in calls)
+
+
+def test_update_coordinator_fails_when_the_image_does_not_match(monkeypatch, tmp_path):
+    host = MemoryHost()
+    install_coordinator(host, coordinator_state(), [])
+    before_revision = host.read(linux_paths()["coordinator_prefix"] + "/REVISION")
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    calls: list = []
+    monkeypatch.setattr(
+        flows, "_run",
+        _fake_docker_run(calls, container_image="sha256:" + "b" * 64, built_image="a" * 64),
+    )
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "coordinator", messages)
+    assert result["code"] == EXIT_FAILED and result["changed"] is True
+    assert any("does not match" in line for line in messages)
+    # The package synced, but REVISION still records the deployed (old) code.
+    assert host.read(linux_paths()["coordinator_prefix"] + "/coordinator/main.py") == "MAIN = 'new'\n"
+    assert host.read(linux_paths()["coordinator_prefix"] + "/REVISION") == before_revision
+
+
+def test_update_node_syncs_restarts_and_keeps_operator_config(monkeypatch, tmp_path):
+    host = MemoryHost(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    prefix = linux_paths()["node_prefix"]
+    unit = linux_paths()["node_unit"]
+    # Operator-edited runtime config that update must never clobber.
+    host.write(prefix + "/config/supervisor.yaml", "llm:\n  base_url: http://127.0.0.1:8081/v1\n")
+    before_env = host.read(linux_paths()["node_env"])
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    calls: list = []
+    monkeypatch.setattr(
+        flows, "_run",
+        _fake_docker_run(calls, container_image="sha256:" + "a" * 64, built_image="a" * 64),
+    )
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", messages)
+    assert result["code"] == EXIT_OK and result["changed"] is True
+    # supervisor/ nested; worker/ and recipe/ flat (#53).
+    assert host.read(prefix + "/supervisor/supervisor.py") == "SUPERVISOR = 'new'\n"
+    assert host.read(prefix + "/worker/prep.py") == "PREP = 'new'\n"
+    assert host.read(prefix + "/recipe/voice.txt") == "voice\n"
+    for name in (
+        "supervisor.Dockerfile",
+        "worker-prep.Dockerfile",
+        "worker-tts.Dockerfile",
+        "recipe-michael.Dockerfile",
+        "probe.Dockerfile",
+        "build-images.sh",
+    ):
+        assert host.read(prefix + "/" + name) == f"# {name}\n"
+    assert host.read(prefix + "/REVISION") == "rev" + "a" * 40
+    assert host.read(linux_paths()["node_env"]) == before_env
+    supervisor_yaml = host.read(prefix + "/config/supervisor.yaml")
+    assert supervisor_yaml is not None and "8081" in supervisor_yaml
+    assert host.restarts == [unit]
+    assert any("node updated" in line for line in messages)
+    assert any("heartbeat" in line for line in messages)
+
+
+def test_update_node_reports_a_unit_restart_failure(monkeypatch, tmp_path):
+    class RestartFails(MemoryHost):
+        def restart(self, name):
+            raise RuntimeError("start-pre operation timed out")
+
+    host = RestartFails(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    before_revision = host.read(linux_paths()["node_prefix"] + "/REVISION")
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    calls: list = []
+    monkeypatch.setattr(
+        flows, "_run",
+        _fake_docker_run(calls, container_image="sha256:" + "a" * 64, built_image="a" * 64),
+    )
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", messages)
+    assert result["code"] == EXIT_FAILED
+    assert any("timed out" in line for line in messages)
+    # Files were synced before the restart failed, so a rerun is safe — but
+    # REVISION still records the deployed (old) code.
+    assert host.read(linux_paths()["node_prefix"] + "/supervisor/supervisor.py") == "SUPERVISOR = 'new'\n"
+    assert host.read(linux_paths()["node_prefix"] + "/REVISION") == before_revision
+
+
+def test_update_node_retries_the_container_inspect(monkeypatch, tmp_path):
+    host = MemoryHost(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    state = {"inspects": 0}
+
+    def run(argv):
+        if "inspect" in argv and argv[1] == "inspect":
+            state["inspects"] += 1
+            if state["inspects"] == 1:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+            return subprocess.CompletedProcess(argv, 0, stdout="sha256:" + "a" * 64 + "\n", stderr="")
+        if "inspect" in argv and argv[1] == "image":
+            return subprocess.CompletedProcess(argv, 0, stdout="a" * 64 + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flows, "_run", run)
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", [])
     assert result["code"] == EXIT_OK
-    assert host.read(linux_paths()["coordinator_prefix"] + "/MARKER") == "build-7"
-    assert host.read(linux_paths()["coordinator_env"]) == before
-    assert host.restarts[-1] == "audiobook-coordinator.service"
+    assert state["inspects"] >= 2
+    assert host.read(linux_paths()["node_prefix"] + "/REVISION") == "rev" + "a" * 40
+
+
+def test_update_node_fails_when_the_container_never_appears(monkeypatch, tmp_path):
+    host = MemoryHost(ips=["10.0.0.5"])
+    install_node(host, node_state(), FakeApi(), [])
+    monkeypatch.setattr(flows, "_git_revision", lambda cwd: "rev" + "a" * 40)
+    monkeypatch.setattr(flows, "_VERIFY_WAIT_SECONDS", 0.0)
+
+    def run(argv):
+        if "inspect" in argv and argv[1] == "inspect":
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such object")
+        if "inspect" in argv and argv[1] == "image":
+            return subprocess.CompletedProcess(argv, 0, stdout="a" * 64 + "\n", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flows, "_run", run)
+    messages = []
+    result = update_role(host, str(_update_source_tree(tmp_path)), "node", messages)
+    assert result["code"] == EXIT_FAILED
+    assert any("missing after restart" in line for line in messages)
+
+
+def test_update_refuses_windows_non_root_bad_source_and_uninstalled(tmp_path):
+    source = str(_update_source_tree(tmp_path))
+    windows = MemoryHost(os_name="windows")
+    assert update_role(windows, source, "coordinator", [])["code"] == EXIT_PRECONDITION
+    non_root = MemoryHost(root=False)
+    assert update_role(non_root, source, "node", [])["code"] == EXIT_PRECONDITION
+
+    fresh = MemoryHost()
+    assert update_role(fresh, source, "coordinator", [])["code"] == EXIT_PRECONDITION
+    assert update_role(fresh, source, "node", [])["code"] == EXIT_PRECONDITION
+    assert fresh.files == {}
+
+    missing = tmp_path / "not-a-repo"
+    missing.mkdir()
+    installed = MemoryHost()
+    install_coordinator(installed, coordinator_state(), [])
+    before = dict(installed.files)
+    result = update_role(installed, str(missing), "coordinator", [])
+    assert result["code"] == EXIT_PRECONDITION
+    assert installed.files == before
 
 
 def test_uninstall_purge_and_local_only():
@@ -178,6 +401,7 @@ def test_windows_node_task_and_prep_without_gpu():
     assert prep.packages == ["docker-ce"]
     node_unit = prep.units["audiobook-supervisor.service"]
     assert "/var/run/docker.sock" in node_unit
+    assert "TimeoutStartSec=1800" in node_unit
     assert "venv" not in node_unit
     assert "--gpus" not in node_unit
     assert "python3" not in prep.packages
