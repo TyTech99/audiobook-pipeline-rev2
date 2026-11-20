@@ -468,6 +468,17 @@ def repair_fragment_completions(pages: list[dict], language: str = "eng") -> lis
 # class is five letters and up ('didso', 'anend', 'himnoharm').
 _MIN_JOINED_LEN = 5
 
+# Productive English prefixes (#72 disposition): a decomposition led by one
+# of these is an author coinage until proven otherwise ('ungladly' —
+# human-confirmed author intent — decomposes un|gladly and must ship
+# solid). One definition, used by the joined-words repair only.
+_PRODUCTIVE_PREFIXES = frozenset(
+    (
+        "un", "out", "over", "under", "up", "down", "non", "dis", "mis",
+        "re", "pre", "post", "sub", "co", "anti", "semi",
+    )
+)
+
 
 def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
     """Deterministic missing-space repairs for joined dictionary words (#72).
@@ -552,7 +563,13 @@ def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
         repairs: dict[str, list[str]] = {}
         for token in counts:
             parts = _unique_decomposition(token)
-            if parts:
+            # Prefix guard (#72 disposition, resolved 2026-11-20): a split
+            # led by a productive English prefix is refused — 'un'-style
+            # author coinages ('ungladly', human-confirmed author intent)
+            # always decompose into dictionary words and would always be
+            # falsely split. True joins keep their leading segments
+            # ('did', 'an', 'him') outside the prefix set.
+            if parts and parts[0].lower() not in _PRODUCTIVE_PREFIXES:
                 repairs[token] = parts
         if not repairs:
             p["joined_repairs"] = None

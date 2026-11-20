@@ -751,6 +751,9 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         # (regression: the pre-witness-pruning rule refused anend/himnoharm
         # on exactly these garbage decompositions)
         "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
+        # prefix-guard fixture words (#72 disposition): 'un'-led coinages
+        # are author intent until proven otherwise and must ship solid
+        "un\ngladly\n"
     )
     monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
 
@@ -762,12 +765,16 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         {
             "page": 5,
             "ocr_quality": {"passed": True},
-            "text": "so did an end come with no harm to him. the form of ore was more for them.",
+            "text": "so did an end come with no harm to him. the form of ore was more for them. un gladly he accepted.",
         },
         {"page": 18, "ocr_quality": {"passed": True}, "text": "they might have didso. better."},
         {"page": 6, "ocr_quality": {"passed": True}, "text": "will one day come to anend."},
         {"page": 21, "ocr_quality": {"passed": True}, "text": "they did himnoharm. and knew it."},
         {"page": 22, "ocr_quality": {"passed": True}, "text": "they formore it."},
+        # The prefix-guard case (#72 disposition, resolved 2026-11-20):
+        # 'ungladly' is human-confirmed author intent — the unique
+        # decomposition un|gladly is refused and the word ships solid.
+        {"page": 24, "ocr_quality": {"passed": True}, "text": "they came ungladly to the work."},
         {"page": 23, "text": "a text layer page with didso aside"},
     ]
     records = repair_joined_words(pages, "eng")
@@ -780,8 +787,18 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
     assert pages[3]["text"] == "they did him no harm. and knew it."
     # 'formore' has TWO valid decompositions (for|more, form|ore) — refused.
     assert "they formore it." == pages[4]["text"]
+    # The prefix guard: 'ungladly' decomposes uniquely to un|gladly with
+    # both halves witnessed — and is refused anyway, because 'un' is a
+    # productive prefix and the coinage is author intent.
+    assert "they came ungladly to the work." == pages[5]["text"]
+    assert pages[5].get("joined_repairs") in (None, [])
     # text-layer pages are the book's own typeset text — never repaired.
-    assert "didso" in pages[5]["text"]
+    assert "didso" in pages[6]["text"]
+    # The proven true joins keep their leading segments outside the
+    # prefix set — the guard must never reach them.
+    from worker.prep.ocr_cleanup import _PRODUCTIVE_PREFIXES
+
+    assert not ({"did", "an", "him"} & _PRODUCTIVE_PREFIXES)
     # three-way join on a capitalized occurrence keeps its capital
     (dictdir / "american-english-large").write_text(
         "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
