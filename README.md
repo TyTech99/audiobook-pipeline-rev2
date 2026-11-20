@@ -302,7 +302,7 @@ Output of the prep stage. A directory containing:
 - `metadata.json`: extracted and enriched metadata
 - `llm-analysis.json`: subject summary, tone analysis, style recommendations
 - `cleanup-log.json`: every LLM cleanup change kept or reverted, with its justification (#65)
-- `fidelity-report.json`: per-book cleanup fidelity — kept by class, reverted, fragment completions, low-confidence sites, declared word sites, 0 unattributed (#65, #68, #70)
+- `fidelity-report.json`: per-book cleanup fidelity — kept by class, reverted, fragment completions, joined words, low-confidence sites, declared word sites, 0 unattributed (#65, #68, #70, #72)
 - `ocr-quality.json`: per-page OCR gate verdicts (confidence, dict-share, reasons) for every OCR page (#68)
 - `manifest.json`: package manifest with validation status
 - `cover.jpg`: cover art

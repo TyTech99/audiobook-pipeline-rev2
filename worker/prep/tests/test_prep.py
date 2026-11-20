@@ -687,6 +687,84 @@ def test_repair_fragment_completions_min_length_guard(tmp_path, monkeypatch):
     assert "the im of it" == pages[0]["text"]
 
 
+def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
+    # Issue #72: joined dictionary words repair deterministically when the
+    # decomposition is unique and every segment is book-witnessed; ambiguity
+    # refuses; text-layer pages are never touched.
+    from worker.prep.ocr_cleanup import repair_joined_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    (dictdir / "american-english-large").write_text(
+        "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
+        "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
+        "for\nmore\nform\nore\n"
+        # junk fragments that real word-lists carry: dictionary-present but
+        # never book-witnessed — they must NOT veto the true splits
+        # (regression: the pre-witness-pruning rule refused anend/himnoharm
+        # on exactly these garbage decompositions)
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
+    )
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+
+    pages = [
+        # A corpus page that witnesses every repair segment as the author's
+        # own usage — the witness requirement is part of the rule — and
+        # witnesses the ambiguity words so 'formore' is refused by
+        # AMBIGUITY, not by missing witnesses.
+        {
+            "page": 5,
+            "ocr_quality": {"passed": True},
+            "text": "so did an end come with no harm to him. the form of ore was more for them.",
+        },
+        {"page": 18, "ocr_quality": {"passed": True}, "text": "they might have didso. better."},
+        {"page": 6, "ocr_quality": {"passed": True}, "text": "will one day come to anend."},
+        {"page": 21, "ocr_quality": {"passed": True}, "text": "they did himnoharm. and knew it."},
+        {"page": 22, "ocr_quality": {"passed": True}, "text": "they formore it."},
+        {"page": 23, "text": "a text layer page with didso aside"},
+    ]
+    records = repair_joined_words(pages, "eng")
+    by_word = {r["word"]: r for r in records}
+    assert set(by_word) == {"didso", "anend", "himnoharm"}
+    assert by_word["didso"]["words"] == ["did", "so"]
+    assert by_word["himnoharm"]["words"] == ["him", "no", "harm"]
+    assert pages[1]["text"] == "they might have did so. better."
+    assert pages[2]["text"] == "will one day come to an end."
+    assert pages[3]["text"] == "they did him no harm. and knew it."
+    # 'formore' has TWO valid decompositions (for|more, form|ore) — refused.
+    assert "they formore it." == pages[4]["text"]
+    # text-layer pages are the book's own typeset text — never repaired.
+    assert "didso" in pages[5]["text"]
+    # three-way join on a capitalized occurrence keeps its capital
+    (dictdir / "american-english-large").write_text(
+        "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
+        "did\nso\nan\nend\nhim\nno\nharm\ntext\nlayer\npage\nwith\naside\n"
+        "for\nmore\nform\nore\n"
+        "hi\nmn\noh\narm\nane\nnd\nha\nrm\nnoh\nof\nwas\nthem\n"
+    )
+    pages2 = [
+        {"page": 5, "ocr_quality": {"passed": True}, "text": "so did an end come with no harm to him."},
+        {"page": 21, "ocr_quality": {"passed": True}, "text": "Himnoharm. they knew."},
+    ]
+    records2 = repair_joined_words(pages2, "eng")
+    assert pages2[1]["text"] == "Him no harm. they knew."
+    assert records2[0]["words"] == ["him", "no", "harm"]
+
+
+def test_repair_joined_words_requires_book_witness(tmp_path, monkeypatch):
+    from worker.prep.ocr_cleanup import repair_joined_words
+
+    dictdir = tmp_path / "dicts"
+    dictdir.mkdir()
+    # 'sooth' decomposes uniquely into so|oth — but 'oth' never occurs in
+    # the book's parsed text, so no witness and no repair.
+    (dictdir / "american-english-large").write_text("the\nof\nso\noth\nwar\n")
+    monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
+    pages = [{"page": 1, "ocr_quality": {"passed": True}, "text": "the sooth of war"}]
+    assert repair_joined_words(pages, "eng") == []
+    assert "sooth" in pages[0]["text"]
+
+
 def test_verify_cleanup_reverts_structural_damage():
     # Issue #65: the line sequence is the paragraph witness.
     from worker.prep.ocr_cleanup import OcrQualitySettings, verify_cleanup
