@@ -1607,7 +1607,7 @@ def test_fetch_abbyy_xml_verifies_manifest(tmp_path):
         def __init__(self, pdf_sha1):
             self.pdf_sha1 = pdf_sha1
 
-        def get(self, url):
+        def get(self, url, **kwargs):
             if "metadata" in url:
                 return _Resp({"files": [
                     {"name": "item.pdf", "sha1": self.pdf_sha1},
@@ -1631,8 +1631,8 @@ def test_fetch_abbyy_xml_verifies_manifest(tmp_path):
         )
     # a corrupt download (sha1 mismatch) refuses too
     class _BadClient(_Client):
-        def get(self, url):
-            resp = super().get(url)
+        def get(self, url, **kwargs):
+            resp = super().get(url, **kwargs)
             return _Resp(b"corrupt bytes") if "download" in url else resp
 
     with pytest.raises(ValueError):

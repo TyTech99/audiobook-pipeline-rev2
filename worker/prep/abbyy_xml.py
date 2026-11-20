@@ -48,7 +48,9 @@ def fetch_abbyy_xml(identifier: str, cache_path: str, http=None, pdf_sha1: str |
     import httpx
 
     client = http or httpx.Client(timeout=120)
-    manifest_response = client.get(ARCHIVE_METADATA_URL.format(identifier=identifier))
+    manifest_response = client.get(
+        ARCHIVE_METADATA_URL.format(identifier=identifier), follow_redirects=True
+    )
     manifest_response.raise_for_status()
     files = manifest_response.json().get("files", [])
     abbyy_entry = next((f for f in files if f.get("name", "").endswith("_abbyy.gz")), None)
@@ -61,7 +63,11 @@ def fetch_abbyy_xml(identifier: str, cache_path: str, http=None, pdf_sha1: str |
                 "manifest PDF sha1 does not match the job input - the item was "
                 "re-derived since this file was captured; refusing unverified XML"
             )
-    data = client.get(ARCHIVE_ABBYY_URL.format(identifier=identifier)).content
+    download_response = client.get(
+        ARCHIVE_ABBYY_URL.format(identifier=identifier), follow_redirects=True
+    )
+    download_response.raise_for_status()
+    data = download_response.content
     got = hashlib.sha1(data).hexdigest()
     want = (abbyy_entry.get("sha1") or "").lower()
     if want and got.lower() != want:
