@@ -19,12 +19,16 @@
     "metadata": {
       "type": "object",
       "properties": {
-        "title": {"type": "string"},
-        "author": {"type": "string"},
-        "language": {"type": "string"},
-        "customer_id": {"type": "string"},
-        "performance_style": {"type": "string"},
-        "voice_recipe": {"type": "object"}
+        "title": { "type": "string" },
+        "author": { "type": "string" },
+        "language": { "type": "string" },
+        "customer_id": { "type": "string" },
+        "performance_style": { "type": "string" },
+        "voice_recipe": { "type": "object" },
+        "archive_identifier": {
+          "type": "string",
+          "description": "Internet Archive item identifier. When present on a prep job, the worker fetches the item's ABBYY XML derivative (sha1-verified against the manifest and the input PDF) and annotates the word-level declaration with the recognizing engine's own per-word confidence and flags (#81 phase 1)."
+        }
       }
     }
   }
