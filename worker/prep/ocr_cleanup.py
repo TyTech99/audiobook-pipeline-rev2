@@ -468,6 +468,34 @@ def repair_fragment_completions(pages: list[dict], language: str = "eng") -> lis
 # class is five letters and up ('didso', 'anend', 'himnoharm').
 _MIN_JOINED_LEN = 5
 
+# Productive English prefixes (#72 disposition): a decomposition led by one
+# of these is an author coinage until proven otherwise ('ungladly' —
+# human-confirmed author intent — decomposes un|gladly and must ship
+# solid). One definition, used by the joined-words repair only.
+_PRODUCTIVE_PREFIXES = frozenset(
+    (
+        "un", "out", "over", "under", "up", "down", "non", "dis", "mis",
+        "re", "pre", "post", "sub", "co", "anti", "semi",
+    )
+)
+
+# Roman-numeral letters (#72): a token composed only of these is a folio
+# in roman numerals, possibly OCR-garbled ('xxvil' = XXVII) — never a
+# joined-word candidate.
+_ROMAN_LETTERS = frozenset("ivxlcdm")
+
+
+def _dict_substring_hit(token: str, dictionary) -> bool:
+    """True when a longer dictionary word contains the token (#72 guard).
+
+    A fragment of a real word ('sideration' in reconsideration, 'hardie'
+    in foolhardier, 'livered' in redelivered) is a truncated word, not a
+    scan-join. Refusal is fail-closed: a true join caught here merely
+    ships solid and declared instead of being split.
+    """
+    t = token.lower()
+    return any(len(w) > len(t) + 1 and t in w for w in dictionary)
+
 
 def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
     """Deterministic missing-space repairs for joined dictionary words (#72).
@@ -552,8 +580,26 @@ def repair_joined_words(pages: list[dict], language: str = "eng") -> list[dict]:
         repairs: dict[str, list[str]] = {}
         for token in counts:
             parts = _unique_decomposition(token)
-            if parts:
-                repairs[token] = parts
+            if not parts:
+                continue
+            # Prefix guard (#72 disposition, resolved 2026-11-20): a split
+            # led by a productive English prefix is refused — 'un'-style
+            # author coinages ('ungladly', human-confirmed author intent)
+            # always decompose into dictionary words and would always be
+            # falsely split. True joins keep their leading segments
+            # ('did', 'an', 'him') outside the prefix set.
+            if parts[0].lower() in _PRODUCTIVE_PREFIXES:
+                continue
+            # Roman-folio guard: 'xxvil' is a garbled XXVII folio, not a
+            # joined word — refuse by shape before any dictionary work.
+            if set(token.lower()) <= _ROMAN_LETTERS:
+                continue
+            # Fragment guard: a token contained in a longer dictionary
+            # word is a truncated word ('sideration', 'hardie', 'livered'),
+            # not a scan-join. Fail-closed: refusals ship solid, declared.
+            if _dict_substring_hit(token, dictionary):
+                continue
+            repairs[token] = parts
         if not repairs:
             p["joined_repairs"] = None
             continue
