@@ -253,13 +253,22 @@ class PrepWorker:
             # repair source.
             abbyy_pages = None
             archive_identifier = (job.get("metadata") or {}).get("archive_identifier")
-            if archive_identifier and output_prefix:
+            if archive_identifier:
                 try:
                     import hashlib
 
                     from worker.prep import abbyy_xml
 
-                    xml_path = f"{output_prefix.rstrip('/')}/abbyy.xml"
+                    # The package dir: settings may or may not carry an
+                    # explicit output_prefix on this node — the fallback
+                    # mirrors the package writer's own derivation so the
+                    # XML cache always lands beside the artifacts.
+                    ingest_dir = (
+                        output_prefix.rstrip("/")
+                        if output_prefix
+                        else f"{str(self.settings.get('storage_root') or '/var/lib/audiobook').rstrip('/')}/packages/{job_id}"
+                    )
+                    xml_path = f"{ingest_dir}/abbyy.xml"
                     abbyy_xml.fetch_abbyy_xml(
                         archive_identifier,
                         xml_path,
