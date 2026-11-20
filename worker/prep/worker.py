@@ -210,6 +210,8 @@ class PrepWorker:
         ocr_quality_pages: list[dict] = []
         fragment_repair_records: list[dict] = []
         joined_repair_records: list[dict] = []
+        engine_flagged_sites: list[dict] = []
+        abbyy_summaries: list[dict] = []
         if input_format == "pdf":
             logger.info("Parsing PDF...")
             # Get LLM client for OCR cleanup if available
@@ -243,6 +245,46 @@ class PrepWorker:
             self.check_cancelled(job_id)
             # Cleanup verify records flow into the package logs (#65).
             cleanup_records = [p["cleanup"] for p in doc["pages"] if p.get("cleanup")]
+
+            # ABBYY XML ingestion (#81 phase 1): the archive derivative is the
+            # upstream source of the hidden text layer and carries the
+            # recognizing engine's per-word confidence and flags. It
+            # annotates the declaration — a deterministic signal, never a
+            # repair source.
+            abbyy_pages = None
+            archive_identifier = (job.get("metadata") or {}).get("archive_identifier")
+            if archive_identifier:
+                try:
+                    import hashlib
+
+                    from worker.prep import abbyy_xml
+
+                    # The package dir: settings may or may not carry an
+                    # explicit output_prefix on this node — the fallback
+                    # mirrors the package writer's own derivation so the
+                    # XML cache always lands beside the artifacts.
+                    ingest_dir = (
+                        output_prefix.rstrip("/")
+                        if output_prefix
+                        else f"{str(self.settings.get('storage_root') or '/var/lib/audiobook').rstrip('/')}/packages/{job_id}"
+                    )
+                    xml_path = f"{ingest_dir}/abbyy.xml"
+                    abbyy_xml.fetch_abbyy_xml(
+                        archive_identifier,
+                        xml_path,
+                        http=self.http,
+                        pdf_sha1=hashlib.sha1(data).hexdigest(),
+                    )
+                    abbyy_pages = abbyy_xml.parse_abbyy_words(xml_path)
+                    logger.info(
+                        "ABBYY XML ingested: item %s, %d pages",
+                        archive_identifier,
+                        len(abbyy_pages),
+                    )
+                except Exception as e:
+                    # Containment (#79 lesson): ingestion failure must never
+                    # fail the job — the run proceeds unannotated.
+                    logger.warning("ABBYY XML ingestion skipped: %s", e)
             # Extract metadata early (needed for normalization header detection)
             metadata = doc["metadata"]
             title_hint = metadata.get("title") or job.get("metadata", {}).get("title") or ""
@@ -291,6 +333,14 @@ class PrepWorker:
             for p in doc["pages"]:
                 declared_by_page[p["page"]] = declare_page_words(p["page"], p.get("text", ""), job_language)
             declared_sites = [s for sites in declared_by_page.values() for s in sites]
+            if abbyy_pages:
+                from worker.prep import abbyy_xml
+
+                abbyy_xml.annotate_declared_sites(declared_sites, abbyy_pages)
+                engine_flagged_sites = [s for s in declared_sites if s.get("engine_flagged")]
+                abbyy_summaries = abbyy_xml.page_summaries(
+                    abbyy_pages, [p["page"] for p in doc["pages"]]
+                )
             fragment_repair_records = [r for p in raw_pages for r in (p.get("fragment_repairs") or [])]
             joined_repair_records = [r for p in raw_pages for r in (p.get("joined_repairs") or [])]
             ocr_quality_pages = [
@@ -439,10 +489,17 @@ class PrepWorker:
             "joined_words_applied": len(joined_repair_records),
             "joined_words": joined_repair_records[:50],
             "unattributed_changes": 0,
+            # Engine-flagged unknowns (#81 phase 1): declared words the
+            # archive's recognizing engine itself read uncertainly (low
+            # confidence or flagged suspicious) — the damage side of the
+            # class split. The rest of the declared inventory is
+            # engine-confident: names, coinages, foreign words.
+            "engine_flagged_sites": len(engine_flagged_sites),
+            "engine_flagged_sample": engine_flagged_sites[:20],
         }
         logger.info(
             "Cleanup fidelity: kept=%d reverted=%d structural_reverts=%d low_conf_sites=%d "
-            "declared_words=%d fragment_completions=%d joined_words=%d unattributed=0",
+            "declared_words=%d fragment_completions=%d joined_words=%d engine_flagged=%d unattributed=0",
             fidelity["changes_kept"],
             fidelity["changes_reverted"],
             fidelity["structural_reverts"],
@@ -450,6 +507,7 @@ class PrepWorker:
             fidelity["declared_word_sites"],
             fidelity["fragment_completions_applied"],
             fidelity["joined_words_applied"],
+            fidelity["engine_flagged_sites"],
         )
 
         package = {
@@ -474,6 +532,7 @@ class PrepWorker:
                         "declared_word_sites": fidelity["declared_word_sites"],
                         "fragment_completions_applied": fidelity["fragment_completions_applied"],
                         "joined_words_applied": fidelity["joined_words_applied"],
+                        "engine_flagged_sites": fidelity["engine_flagged_sites"],
                         "unattributed_changes": fidelity["unattributed_changes"],
                     },
                 },
@@ -492,24 +551,28 @@ class PrepWorker:
             "cleanup_log": cleanup_records,
             "fidelity": fidelity,
             "ocr_quality_pages": ocr_quality_pages,
+            "abbyy_quality": abbyy_summaries,
         }
 
         root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
         output_prefix = self.settings.get("output_prefix") or f"file://{root}/packages/{job_id}/"
+        package_files = {
+            "book.epub": package["epub"],
+            "script.json": json.dumps(package["script"]),
+            "page-ledger.json": json.dumps(package["page_ledger"]),
+            "metadata.json": json.dumps(package["metadata"]),
+            "llm-analysis.json": json.dumps(package["llm_analysis"]),
+            "cleanup-log.json": json.dumps(package["cleanup_log"]),
+            "fidelity-report.json": json.dumps(package["fidelity"]),
+            "ocr-quality.json": json.dumps(package["ocr_quality_pages"]),
+            "manifest.json": json.dumps(package["manifest"]),
+            "cover.jpg": package["cover"],
+        }
+        if package["abbyy_quality"]:
+            package_files["abbyy-quality.json"] = json.dumps(package["abbyy_quality"])
         package_url = upload_package_dir(
             output_prefix,
-            {
-                "book.epub": package["epub"],
-                "script.json": json.dumps(package["script"]),
-                "page-ledger.json": json.dumps(package["page_ledger"]),
-                "metadata.json": json.dumps(package["metadata"]),
-                "llm-analysis.json": json.dumps(package["llm_analysis"]),
-                "cleanup-log.json": json.dumps(package["cleanup_log"]),
-                "fidelity-report.json": json.dumps(package["fidelity"]),
-                "ocr-quality.json": json.dumps(package["ocr_quality_pages"]),
-                "manifest.json": json.dumps(package["manifest"]),
-                "cover.jpg": package["cover"],
-            },
+            package_files,
         )
 
         self.http.post(

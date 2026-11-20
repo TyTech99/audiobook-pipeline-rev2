@@ -1498,3 +1498,144 @@ def test_ocr_quality_gate_structural_triggers(tmp_path, monkeypatch):
     clipped2 = {"text": "the British people were prepared to fight. ry did not", "confidence": 96.0}
     result = judge_ocr_quality(clipped2, settings)
     assert any(r.startswith("mid_line_lower_restart") for r in result["reasons"]), result["reasons"]
+
+
+def _abbyy_fixture() -> str:
+    """A minimal ABBYY FineReader XML: two pages, wordStart-delimited
+    charParams, per-char confidence/suspicious — the real archive schema
+    (no spaces are stored; words are wordStart runs)."""
+    def ch(text, conf, start=False, suspicious=False, dictionary=True, l=0):
+        return (
+            f'<charParams l="{l}" t="10" r="{l + 4}" b="20" '
+            f'wordStart="{"true" if start else "false"}" '
+            f'suspicious="{"true" if suspicious else "false"}" '
+            f'wordFromDictionary="{"true" if dictionary else "false"}" '
+            f'wordNormal="true" wordNumeric="false" wordIdentifier="false" '
+            f'charConfidence="{conf}">{text}</charParams>'
+        )
+
+    speajrman = "".join(
+        ch(c, conf, start=(i == 0), suspicious=susp, dictionary=False, l=10 + 4 * i)
+        for i, (c, conf, susp) in enumerate(
+            [("S", 55, False), ("P", 55, False), ("E", 55, True), ("A", 53, True),
+             ("J", 55, True), ("R", 30, True), ("M", 55, False), ("A", 54, False),
+             ("N", 55, False)]
+        )
+    )
+    page1 = (
+        '<page width="100" height="100"><block blockType="Text"><text><par><line>'
+        '<formatting lang="EnglishUnitedStates" ff="Arial" fs="22.5">'
+        + ch("T", 95, start=True) + ch("H", 95) + ch("E", 95)
+        + speajrman
+        + "</formatting></line></par></text></block></page>"
+    )
+    page2 = (
+        '<page width="100" height="100"><block blockType="Text"><text><par><line>'
+        '<formatting lang="EnglishUnitedStates" ff="Times" fs="10">'
+        + "".join(ch(c, 98, start=(i == 0)) for i, c in enumerate("holzinger"))
+        + "</formatting></line></par></text></block></page>"
+    )
+    return f"<document>{page1}{page2}</document>"
+
+
+def test_parse_abbyy_words_assembles_wordstart_runs(tmp_path):
+    from worker.prep.abbyy_xml import parse_abbyy_words
+
+    path = tmp_path / "abbyy.xml"
+    path.write_text(_abbyy_fixture())
+    pages = parse_abbyy_words(str(path))
+    assert sorted(pages) == [1, 2]
+    words1 = pages[1]
+    assert [w["text"] for w in words1] == ["THE", "SPEAJRMAN"]
+    spear = words1[1]
+    assert spear["confidence"] == 52  # mean of the char confidences
+    assert spear["min_confidence"] == 30
+    assert spear["suspicious"] is True
+    assert spear["from_dictionary"] is False
+    assert [w["text"] for w in pages[2]] == ["holzinger"]
+    assert pages[2][0]["from_dictionary"] is True
+
+
+def test_annotate_declared_sites_engine_signal_split(tmp_path):
+    from worker.prep.abbyy_xml import annotate_declared_sites, parse_abbyy_words, page_summaries
+
+    path = tmp_path / "abbyy.xml"
+    path.write_text(_abbyy_fixture())
+    pages = parse_abbyy_words(str(path))
+    sites = [
+        {"page": 1, "word": "speajrman", "count": 1},
+        {"page": 2, "word": "holzinger", "count": 1},
+        {"page": 9, "word": "unmatched", "count": 1},
+    ]
+    annotate_declared_sites(sites, pages)
+    assert sites[0]["engine_confidence"] == 52
+    assert sites[0]["engine_suspicious"] is True
+    assert sites[0]["engine_flagged"] is True  # damage side of the split
+    assert sites[1]["engine_confidence"] == 98
+    assert sites[1]["engine_flagged"] is False  # engine-confident author word
+    assert "engine_confidence" not in sites[2]  # no signal is not a signal
+    summaries = page_summaries(pages, [1, 2])
+    assert summaries[0]["flagged_words"] == 1
+    assert summaries[1]["flagged_words"] == 0
+
+
+def test_fetch_abbyy_xml_verifies_manifest(tmp_path):
+    import gzip
+    import hashlib as _hl
+
+    from worker.prep import abbyy_xml
+
+    gz = gzip.compress(b"<document><page></page></document>")
+    gz_sha1 = _hl.sha1(gz).hexdigest()
+    xml_sha1 = _hl.sha1(gzip.decompress(gz)).hexdigest()
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+        @property
+        def content(self):
+            return self._payload
+
+    class _Client:
+        def __init__(self, pdf_sha1):
+            self.pdf_sha1 = pdf_sha1
+
+        def get(self, url, **kwargs):
+            if "metadata" in url:
+                return _Resp({"files": [
+                    {"name": "item.pdf", "sha1": self.pdf_sha1},
+                    {"name": "item_abbyy.gz", "sha1": gz_sha1},
+                ]})
+            return _Resp(gz)
+
+    cache = str(tmp_path / "cache" / "abbyy.xml")
+    entry = abbyy_xml.fetch_abbyy_xml(
+        "item", cache, http=_Client("a" * 40), pdf_sha1="a" * 40  # type: ignore[arg]
+    )
+    assert entry["name"] == "item_abbyy.gz"
+    assert open(cache, "rb").read() == gzip.decompress(gz)
+
+    # a re-derived item (manifest pdf sha1 != our input) refuses ingestion
+    import pytest
+
+    with pytest.raises(ValueError):
+        abbyy_xml.fetch_abbyy_xml(
+            "item", cache, http=_Client("b" * 40), pdf_sha1="a" * 40  # type: ignore[arg]
+        )
+    # a corrupt download (sha1 mismatch) refuses too
+    class _BadClient(_Client):
+        def get(self, url, **kwargs):
+            resp = super().get(url, **kwargs)
+            return _Resp(b"corrupt bytes") if "download" in url else resp
+
+    with pytest.raises(ValueError):
+        abbyy_xml.fetch_abbyy_xml(
+            "item", cache, http=_BadClient("a" * 40), pdf_sha1="a" * 40  # type: ignore[arg]
+        )
