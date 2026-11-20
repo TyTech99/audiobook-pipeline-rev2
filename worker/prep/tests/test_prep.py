@@ -754,6 +754,15 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         # prefix-guard fixture words (#72 disposition): 'un'-led coinages
         # are author intent until proven otherwise and must ship solid
         "un\ngladly\n"
+        # 1045b864 regression set: segments + the longer dictionary words
+        # that contain the fragment-class tokens (substring guard evidence)
+        "side\nration\nreconsideration\n"
+        "ex\nterm\nin\nina\nexterminators\npredeterminate\n"
+        "de\nliver\ned\nredelivered\n"
+        "hard\nie\nfoolhardier\n"
+        "xx\nvil\n"
+        "civil\nis\n"
+        "hun\nland\n"
     )
     monkeypatch.setenv("AUDIOBOOK_DICT_DIR", str(dictdir))
 
@@ -765,7 +774,7 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         {
             "page": 5,
             "ocr_quality": {"passed": True},
-            "text": "so did an end come with no harm to him. the form of ore was more for them. un gladly he accepted.",
+            "text": "so did an end come with no harm to him. the form of ore was more for them. un gladly he accepted. each side had a ration of ex term in de ina; the liver ed man, hard ie foolhardier, kept civil is ed and saw the xx vil of hun land.",
         },
         {"page": 18, "ocr_quality": {"passed": True}, "text": "they might have didso. better."},
         {"page": 6, "ocr_quality": {"passed": True}, "text": "will one day come to anend."},
@@ -776,10 +785,20 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
         # decomposition un|gladly is refused and the word ships solid.
         {"page": 24, "ocr_quality": {"passed": True}, "text": "they came ungladly to the work."},
         {"page": 23, "text": "a text layer page with didso aside"},
+        # The 1045b864 regression set, one site page carrying every token
+        # the live Bryant run falsely split (or must refuse to split).
+        {
+            "page": 25,
+            "ocr_quality": {"passed": True},
+            "text": "they sideration extermin determina livered hardie xxvil civilised hunland.",
+        },
     ]
     records = repair_joined_words(pages, "eng")
     by_word = {r["word"]: r for r in records}
-    assert set(by_word) == {"didso", "anend", "himnoharm"}
+    # the three proven true joins, plus the two KNOWN RESIDUALS (see the
+    # pinned asserts below: 'civilised' British spelling, 'hunland'
+    # author coinage — no deterministic text guard yet).
+    assert set(by_word) == {"didso", "anend", "himnoharm", "civilised", "hunland"}
     assert by_word["didso"]["words"] == ["did", "so"]
     assert by_word["himnoharm"]["words"] == ["him", "no", "harm"]
     assert pages[1]["text"] == "they might have did so. better."
@@ -799,6 +818,18 @@ def test_repair_joined_words_unique_decomposition(tmp_path, monkeypatch):
     from worker.prep.ocr_cleanup import _PRODUCTIVE_PREFIXES
 
     assert not ({"did", "an", "him"} & _PRODUCTIVE_PREFIXES)
+    # The 1045b864 regression set: fragment-class tokens refuse (substring
+    # guard: each is contained in a longer dictionary word) and the folio
+    # refuses (roman-shape guard) — all ship solid, declared.
+    regression = pages[7]["text"]
+    for solid in ("sideration", "extermin", "determina", "livered", "hardie", "xxvil"):
+        assert solid in regression, solid
+    # KNOWN RESIDUAL, pinned deliberately: 'civilised' (British spelling,
+    # absent from the American list — British-exemption PR owns it) and
+    # 'hunland' (probable author coinage — phase-2/vision adjudication
+    # owns it) still split today. These asserts flip when those land.
+    assert "civil is ed" in regression
+    assert "hun land" in regression
     # three-way join on a capitalized occurrence keeps its capital
     (dictdir / "american-english-large").write_text(
         "they\nmight\nhave\nbetter\nwill\none\nday\ncome\nto\nand\nknew\nit\n"
