@@ -16,16 +16,23 @@ OPEN_LIBRARY_COVER = "https://covers.openlibrary.org/b/id/{id}-{size}.jpg"
 def extract_cover_from_pdf(data: bytes) -> bytes | None:
     import fitz
 
-    doc = fitz.open(stream=data, filetype="pdf")
+    doc = None
     try:
+        doc = fitz.open(stream=data, filetype="pdf")
         page = doc[0]
         images = page.get_images(full=True)
         if images:
             xref = images[0][0]
-            pix = fitz.Pixmap(doc, xref)
-            if pix.n > 4:
-                pix = fitz.Pixmap(fitz.csRGB, pix)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+            # Decode the image stream itself and let PIL handle whatever
+            # colorspace it actually is (grayscale, RGB, RGBA). The old
+            # Pixmap/frombytes path guessed RGB and crashed on grayscale
+            # scans (#79): pix.n == 1 fell through the n > 4 guard and
+            # Image.frombytes raised "not enough image data", failing the
+            # whole job over cover art.
+            info = doc.extract_image(xref)
+            img = Image.open(io.BytesIO(info["image"]))
+            if img.mode != "RGB":
+                img = img.convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=85)
             return buf.getvalue()
@@ -34,8 +41,15 @@ def extract_cover_from_pdf(data: bytes) -> bytes | None:
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
+    except Exception:
+        # Cover extraction must never fail a job (#79): returning None
+        # hands control to get_cover's fallback chain (OpenLibrary search,
+        # then placeholder). This includes unopenable input — the open
+        # itself lives inside the guard.
+        return None
     finally:
-        doc.close()
+        if doc is not None:
+            doc.close()
 
 
 def extract_cover_from_epub(data: bytes) -> bytes | None:
