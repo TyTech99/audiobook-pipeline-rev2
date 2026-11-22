@@ -14,11 +14,15 @@ Stages:
      retried; segments run serially with state passing inside a chapter,
      chapters are emotional reset points and annotate in parallel
      bounded by the declared LLM seats.
-  2. CosyVoice 3 TTS generation (inference_instruct2, voice clone from
-     voices/Michael.wav, fixed seed re-applied per chunk; fp16 autocast,
-     TensorRT flow plan, and parallel chunk workers per #93). The TTS
-     input is composed from the CLEAN text plus cues (declared engine
-     tags inline; per-segment instruct from the style base + direction).
+  2. CosyVoice 3 TTS generation (zero-shot clone from voices/Michael.wav,
+     fixed seed re-applied per chunk; fp16 autocast, TensorRT flow plan).
+     Parallelism is per CHAPTER CHAIN (#115): each engine process runs one
+     chapter's chunks SERIALLY with rolling-reference tone priming — every
+     chunk after the first primes from the previous chunk's tail (a
+     silence-aligned audio slice plus its own words), and each chapter
+     resets to the canonical reference. The TTS input is composed from
+     the CLEAN text plus cues (declared engine tags inline; per-segment
+     instruct from the style base + direction).
   3. Mastering (ffmpeg loudnorm + resample)
   4. Packaging (M4B with stik=2, per-chapter MP3, credits, retail sample)
 """
@@ -246,13 +250,15 @@ def engine_flags() -> dict[str, bool]:
 
 
 def parallel_workers() -> int:
-    """Chunk-synthesis worker processes (#93).
+    """Chapter chains in flight (#115; previously loose-chunk workers, #93).
 
-    Default 2: the twice-proven configuration on the 16 GB GPU 1 (0
-    failed segments across both measured runs; the one 3-worker run that
-    lost 2 segments to silence is undiagnosed — #111's per-segment
-    failure capture now makes any recurrence self-documenting). Ty's
-    call stands on the measured data; RECIPE_PARALLEL overrides.
+    Default 2: the twice-proven engine-process count on the 16 GB GPU 1
+    (0 failed segments across both measured runs; the one 3-worker run
+    that lost 2 segments to silence is undiagnosed — #111's per-segment
+    failure capture now makes any recurrence self-documenting). The unit
+    of work changed from loose chunks to chapter chains, so the count is
+    chapters in flight; chunks run serially inside each chain. Ty's call
+    stands on the measured data; RECIPE_PARALLEL overrides.
     """
     try:
         return max(1, int(os.environ.get("RECIPE_PARALLEL", "2")))
@@ -900,24 +906,153 @@ def declared_speed() -> float:
         return 1.0
 
 
-def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int) -> None:
+# --- Rolling-reference tone priming (#115) --------------------------------
+# Deterministic pause scan (pure python — unit-testable without torch):
+# the tail cut for the next chunk's priming pair is made at a DETECTED
+# inter-sentence pause so the audio slice and its text match exactly —
+# upstream zero-shot requires the prompt transcript to be verbatim, and
+# the tail wav flows through the same load_wav path as the canonical
+# clip (cosyvoice/utils/file_utils.py:44, resample to the target rate).
+PRIMING_SCAN_WINDOW_MS = 10
+PRIMING_SILENCE_FLOOR_DB = -45.0
+PRIMING_MIN_GAP_MS = 60
+
+
+def priming_enabled() -> bool:
+    """Declared tts.priming with a RECIPE_PRIMING env kill switch.
+
+    The declaration is the lever (#115); the env overrides for one-off
+    isolation runs (RECIPE_PRIMING=0 restores canonical-every-chunk).
+    """
+    declared = (MANIFEST.get("tts") or {}).get("priming", True)
+    default = "1" if declared else "0"
+    env = os.environ.get("RECIPE_PRIMING", default)
+    return env not in ("0", "false", "False")
+
+
+def priming_tail_ms() -> int:
+    """Declared priming clip length (tts.priming_tail_ms, default 6000).
+
+    Must stay inside the engine's trained 3-10s reference range
+    (engine/capabilities.yaml voice_cloning.reference_length)."""
+    try:
+        value = int((MANIFEST.get("tts") or {}).get("priming_tail_ms", 6000))
+    except (TypeError, ValueError):
+        value = 6000
+    return max(0, value)
+
+
+def split_sentences(text: str) -> list[str]:
+    """Sentence fragments of a chunk, using chunk_text's own rule."""
+    return [s for s in re.split(r"(?<=[.!?])\s+", text.strip()) if s]
+
+
+def window_rms_db(samples: list[float], sample_rate: int, window_ms: int = PRIMING_SCAN_WINDOW_MS) -> list[float]:
+    """Per-window RMS in dBFS — pure and deterministic."""
+    win = max(1, int(sample_rate * window_ms / 1000.0))
+    out: list[float] = []
+    for start in range(0, len(samples), win):
+        block = samples[start : start + win]
+        acc = 0.0
+        for s in block:
+            acc += s * s
+        rms = (acc / len(block)) ** 0.5 if block else 0.0
+        out.append(20.0 * math.log10(rms) if rms > 0 else -120.0)
+    return out
+
+
+def silence_gaps(
+    rms_db: list[float],
+    window_ms: int = PRIMING_SCAN_WINDOW_MS,
+    floor_db: float = PRIMING_SILENCE_FLOOR_DB,
+    min_gap_ms: int = PRIMING_MIN_GAP_MS,
+) -> list[tuple[int, int]]:
+    """Runs of windows under the floor -> [(first_window, end_window_exclusive)]."""
+    min_run = max(1, int(min_gap_ms / window_ms))
+    gaps: list[tuple[int, int]] = []
+    start: int | None = None
+    for i, value in enumerate(rms_db):
+        if value < floor_db:
+            if start is None:
+                start = i
+        else:
+            if start is not None and i - start >= min_run:
+                gaps.append((start, i))
+            start = None
+    if start is not None and len(rms_db) - start >= min_run:
+        gaps.append((start, len(rms_db)))
+    return gaps
+
+
+def prime_tail_slice(
+    samples: list[float],
+    sample_rate: int,
+    sentences: list[str],
+    tail_ms: int,
+    min_ms: int = 3000,
+    max_ms: int = 7500,
+) -> tuple[int, int] | None:
+    """Choose a priming-tail cut at a detected inter-sentence pause.
+
+    Returns (sample_index_where_speech_resumes, trailing_sentence_count),
+    or None when no in-range cut exists or the detected pauses cannot be
+    mapped 1:1 to sentence boundaries — the caller then re-anchors to
+    the canonical reference (degrade, never abort, counted in the QC
+    report).
+
+    A chunk at or under max_ms is used whole (its full text is its own
+    transcript). A cut needs at least min_ms of trailing audio to stay
+    inside the engine's trained reference range.
+    """
+    if not samples or not sentences:
+        return None
+    duration_ms = 1000.0 * len(samples) / sample_rate
+    if duration_ms <= max_ms:
+        return 0, len(sentences)
+    win = max(1, int(sample_rate * PRIMING_SCAN_WINDOW_MS / 1000.0))
+    rms_db = window_rms_db(samples, sample_rate)
+    interior = [
+        (s, e)
+        for (s, e) in silence_gaps(rms_db)
+        if s > 0 and e < len(rms_db)
+    ]
+    if len(interior) != len(sentences) - 1:
+        return None
+    best: tuple[int, int] | None = None
+    best_distance: float | None = None
+    for j, (s, e) in enumerate(interior):
+        tail_len_ms = 1000.0 * (len(samples) - e * win) / sample_rate
+        if tail_len_ms < min_ms:
+            continue
+        distance = abs(tail_len_ms - tail_ms)
+        if best_distance is None or distance < best_distance:
+            best, best_distance = (e * win, len(sentences) - (j + 1)), distance
+    return best
+
+
+def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int, prime_wav: pathlib.Path | None = None, prime_text: str | None = None) -> None:
     """Synthesize a single text chunk to a WAV file.
 
-    zero_shot mode clones the reference (voices/Michael.wav) WITH its
-    delivery, via the verbatim transcript; instruct2 clones timbre only
-    and directs delivery through the instruct text. The seed is
-    re-applied before every call so the whole take samples from one RNG
-    state — a stable narrator and a reproducible take, and the property
-    that makes chunk-level parallelism safe (#93): any worker process
-    given the same seed produces the same chunk.
+    zero_shot mode clones the reference WITH its delivery, via the
+    verbatim transcript. The reference is the canonical clip
+    (voices/Michael.wav) unless a #115 priming pair is given — the
+    previous chunk's tail — so tone carries chunk-to-chunk inside a
+    chapter chain. instruct2 clones timbre only and directs delivery
+    through the instruct text. The seed is re-applied before every call
+    so the whole take samples from one RNG state — a stable narrator and
+    a reproducible take: the same seed and the same priming pair produce
+    the same chunk on any worker.
     """
     import torch
     import torchaudio
 
-    log.info("TTS: %d chars -> %s", len(text), output_wav.name)
+    primed = " (tail-primed)" if prime_wav else ""
+    log.info("TTS: %d chars -> %s%s", len(text), output_wav.name, primed)
     torch.manual_seed(seed)
     if synthesis_mode() == "zero_shot":
-        chunks = list(model.inference_zero_shot(text, zero_shot_prompt_text(), str(VOICE_PATH), stream=False, speed=declared_speed()))
+        prompt_wav = str(prime_wav) if prime_wav else str(VOICE_PATH)
+        prompt_text = prime_text if prime_text else zero_shot_prompt_text()
+        chunks = list(model.inference_zero_shot(text, prompt_text, prompt_wav, stream=False, speed=declared_speed()))
     else:
         chunks = list(model.inference_instruct2(text, instruct, str(VOICE_PATH), stream=False, speed=declared_speed()))
     pieces = [c["tts_speech"] for c in chunks if c.get("tts_speech") is not None]
@@ -932,6 +1067,10 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, se
 
 
 # Pool worker state: each parallel process loads its own engine instance.
+# The pool's unit of work is a CHAPTER CHAIN (#115): one process runs one
+# chapter's chunks serially with rolling-reference priming, so the worker
+# count is the number of chapters in flight — the documented parallelism
+# model (chapters parallel, chunks serial within a chapter).
 _POOL_MODEL = None
 
 
@@ -940,41 +1079,110 @@ def _pool_init(model_dir: str, flags: dict[str, bool]) -> None:
     _POOL_MODEL = load_tts(model_dir, flags)
 
 
-def _pool_task(task: tuple) -> tuple[int, str | None]:
-    idx, text, out_path, instruct, seed = task
+def _new_prime_counters() -> dict[str, int]:
+    return {"canonical": 0, "tail_prime": 0, "full_chunk_prime": 0, "re_anchor": 0}
+
+
+def _merge_prime_counters(target: dict[str, int], source: dict[str, int]) -> None:
+    for key, value in source.items():
+        target[key] = target.get(key, 0) + value
+
+
+def _run_chain(
+    model,
+    chain: list[tuple],
+    prime_enabled: bool,
+    tail_ms: int,
+) -> tuple[dict[int, str | None], dict[str, int]]:
+    """Run one chapter's chunk chain serially (#115).
+
+    Chunks within the chain run in order; every chunk after the first
+    primes from the previous chunk's tail when priming is enabled and a
+    clean silence-aligned cut exists. A failed chunk ships its error and
+    the NEXT chunk re-anchors to the canonical reference — never prime
+    from silence or a damaged tail. Returns ({idx: error_or_None},
+    priming counters) — the counters are measured evidence for the QC
+    report, never assertions.
+    """
+    import torch
+    import torchaudio
+
+    results: dict[int, str | None] = {}
+    counts = _new_prime_counters()
+    prev: tuple[list[float], int, list[str]] | None = None
+    for idx, text, fragments, out_path, instruct, seed in chain:
+        prime_wav: pathlib.Path | None = None
+        prime_text: str | None = None
+        if prev is None:
+            counts["canonical"] += 1
+        elif prime_enabled and synthesis_mode() == "zero_shot":
+            samples, sample_rate, prev_fragments = prev
+            selection = prime_tail_slice(samples, sample_rate, prev_fragments, tail_ms)
+            if selection is None:
+                counts["re_anchor"] += 1
+                log.info("Chain: canonical re-anchor for %s (no clean tail cut)", pathlib.Path(out_path).name)
+            else:
+                start, trailing = selection
+                tail_text = " ".join(prev_fragments[len(prev_fragments) - trailing :])
+                tail_wav = pathlib.Path(str(out_path) + ".prime.wav")
+                torchaudio.save(
+                    str(tail_wav),
+                    torch.tensor(samples[start:], dtype=torch.float32).unsqueeze(0),
+                    sample_rate,
+                )
+                prime_wav, prime_text = tail_wav, f"{SYSTEM_PROMPT}{ENDOFPROMPT}{tail_text}"
+                counts["tail_prime" if start else "full_chunk_prime"] += 1
+        try:
+            generate_chunk(model, text, pathlib.Path(out_path), instruct, seed, prime_wav, prime_text)
+            results[idx] = None
+            # The next chunk primes from THIS chunk's rendered audio and
+            # its own fragments (the composed text is the transcript).
+            data, sample_rate = torchaudio.load(str(out_path))
+            prev = (data.squeeze(0).tolist(), int(sample_rate), fragments)
+        except Exception as exc:  # noqa: BLE001 - per-chunk fallback
+            results[idx] = str(exc)
+            prev = None
+            counts["re_anchor"] += 1
+    return results, counts
+
+
+def _pool_chain(args: tuple) -> tuple[dict[int, str | None], dict[str, int]]:
+    chain, prime_enabled, tail_ms = args
     try:
-        generate_chunk(_POOL_MODEL, text, pathlib.Path(out_path), instruct, seed)
-        return idx, None
-    except Exception as exc:  # noqa: BLE001 - per-chunk failures fall back to silence
-        return idx, str(exc)
+        return _run_chain(_POOL_MODEL, chain, prime_enabled, tail_ms)
+    except Exception as exc:  # noqa: BLE001 - a dead engine fails its whole chain
+        return {task[0]: str(exc) for task in chain}, _new_prime_counters()
 
 
-def synthesize_all(
-    tasks: list[tuple],
+def synthesize_chains(
+    chains: list[list[tuple]],
     model_dir: str,
     flags: dict[str, bool],
     n_parallel: int,
-) -> dict[int, str | None]:
-    """Synthesize (idx, text, out_path, instruct, seed) tasks (#93).
+    prime_enabled: bool,
+    tail_ms: int,
+) -> tuple[dict[int, str | None], dict[str, int]]:
+    """Synthesize chapter chains (#115): chains (chapters, credits) are
+    distributed over worker processes; each chain runs serially inside
+    its process.
 
-    Returns {idx: error_or_None}. n_parallel <= 1 (or a single task) runs
-    in-process on one engine. n_parallel > 1 spawns worker processes that
-    each load their own engine; the parent warm-loads once first so
-    exactly-once work — the TensorRT plan build and any first-run cache
-    fill — happens before workers start and no two workers race on the
-    plan file. The warm copy is freed before the pool spawns.
+    Returns ({idx: error_or_None}, priming counters). n_parallel <= 1
+    (or a single chain) runs in-process on one engine. n_parallel > 1
+    spawns worker processes that each load their own engine; the parent
+    warm-loads once first so exactly-once work — the TensorRT plan build
+    and any first-run cache fill — happens before workers start and no
+    two workers race on the plan file. The warm copy is freed before the
+    pool spawns.
     """
-    if n_parallel <= 1 or len(tasks) < 2:
+    if n_parallel <= 1 or len(chains) <= 1:
         model = load_tts(model_dir, flags)
         results: dict[int, str | None] = {}
-        for task in tasks:
-            idx, text, out_path, instruct, seed = task
-            try:
-                generate_chunk(model, text, pathlib.Path(out_path), instruct, seed)
-                results[idx] = None
-            except Exception as exc:  # noqa: BLE001 - per-chunk fallback
-                results[idx] = str(exc)
-        return results
+        counts = _new_prime_counters()
+        for chain in chains:
+            chain_results, chain_counts = _run_chain(model, chain, prime_enabled, tail_ms)
+            results.update(chain_results)
+            _merge_prime_counters(counts, chain_counts)
+        return results, counts
 
     import torch
 
@@ -985,10 +1193,17 @@ def synthesize_all(
 
     import multiprocessing as mp
 
-    log.info("Synthesizing %d chunks on %d workers...", len(tasks), n_parallel)
+    total = sum(len(chain) for chain in chains)
+    log.info("Synthesizing %d chunks across %d chapter chains on %d workers...", total, len(chains), n_parallel)
     ctx = mp.get_context("spawn")
     with ctx.Pool(n_parallel, initializer=_pool_init, initargs=(model_dir, flags)) as pool:
-        return {idx: err for idx, err in pool.map(_pool_task, tasks)}
+        outputs = pool.map(_pool_chain, [(chain, prime_enabled, tail_ms) for chain in chains])
+    results = {}
+    counts = _new_prime_counters()
+    for chain_results, chain_counts in outputs:
+        results.update(chain_results)
+        _merge_prime_counters(counts, chain_counts)
+    return results, counts
 
 
 # ---------------------------------------------------------------------------
@@ -1165,7 +1380,7 @@ def main() -> int:
     else:
         log.info("LLM annotation disabled (LLM_BASE_URL/LLM_MODEL not set), using clean text")
 
-    tasks: list[tuple] = []
+    chains: list[list[tuple]] = []
     chapter_wav_lists: dict[int, list[pathlib.Path]] = {}
     next_idx = 0
 
@@ -1186,6 +1401,7 @@ def main() -> int:
         ch_temp_dir = pathlib.Path(temp_dir) / f"ch{ch_num:03d}"
         ch_temp_dir.mkdir(parents=True, exist_ok=True)
         wav_list: list[pathlib.Path] = []
+        chapter_chain: list[tuple] = []
 
         for i, seg in enumerate(segments):
             seg_id = seg.get("id", f"seg-{i:03d}")
@@ -1212,14 +1428,19 @@ def main() -> int:
             for j, chunk in enumerate(chunks):
                 wav_name = f"{seg_id}-{j:02d}.wav" if len(chunks) > 1 else f"{seg_id}.wav"
                 wav_path = ch_temp_dir / wav_name
-                tasks.append((next_idx, chunk, str(wav_path), seg_instruct, seed))
+                # #115: fragments are this chunk's transcript — the priming
+                # pair for the NEXT chunk in the chapter chain.
+                chapter_chain.append((next_idx, chunk, split_sentences(chunk), str(wav_path), seg_instruct, seed))
                 wav_list.append(wav_path)
                 next_idx += 1
 
         chapter_wav_lists[ch_num] = wav_list
         chapter_info.append({"chapter": ch_num, "title": ch_title, "temp_dir": ch_temp_dir})
+        if chapter_chain:
+            chains.append(chapter_chain)
 
-    # Credits synthesize through the same task path.
+    # Credits synthesize through the same chain path — standalone
+    # single-chunk chains (canonical priming).
     credits_dir = pathlib.Path(temp_dir) / "credits"
     credits_dir.mkdir(parents=True, exist_ok=True)
     opening_text = f"{title}. By {author}. An audiobook."
@@ -1227,22 +1448,26 @@ def main() -> int:
     opening_wav = credits_dir / "opening.wav"
     closing_wav = credits_dir / "closing.wav"
     opening_idx = next_idx
-    tasks.append((opening_idx, opening_text, str(opening_wav), default_instruct, seed))
+    chains.append([(opening_idx, opening_text, split_sentences(opening_text), str(opening_wav), default_instruct, seed)])
     next_idx += 1
     closing_idx = next_idx
-    tasks.append((closing_idx, closing_text, str(closing_wav), default_instruct, seed))
+    chains.append([(closing_idx, closing_text, split_sentences(closing_text), str(closing_wav), default_instruct, seed)])
     next_idx += 1
 
+    # Flat view for failure accounting and segment_failures naming.
+    tasks = [task for chain in chains for task in chain]
     total_segments = next_idx - 2  # chapter chunks only; credits excluded
 
     if total_segments <= 0 and not existing_checkpoints:
         log.error("No chapters were generated")
         return 1
 
-    # Stage 2 execution
+    # Stage 2 execution — chapter chains (#115): the pool distributes
+    # chains (chapters in flight); each chain runs serially with
+    # rolling-reference tone priming.
     model_dir = resolve_model_dir()
     synth_start = time.time()
-    errors = synthesize_all(tasks, model_dir, flags, n_parallel)
+    errors, prime_counts = synthesize_chains(chains, model_dir, flags, n_parallel, priming_enabled(), priming_tail_ms())
     synthesis_seconds = time.time() - synth_start
 
     failed_segments = 0
@@ -1426,6 +1651,11 @@ def main() -> int:
             "fp16": flags["fp16"],
             "trt_flow": flags["load_trt"],
             "parallel_workers": n_parallel,
+            "priming": {
+                "enabled": priming_enabled(),
+                "tail_ms": priming_tail_ms(),
+                "counters": prime_counts,
+            },
             "synthesis_seconds": round(synthesis_seconds, 1),
             "synthesis_rtf": round(synthesis_seconds / full_duration, 3) if full_duration else None,
         },

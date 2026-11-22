@@ -5,10 +5,12 @@ stack: "cosyvoice3"
 description: >
   Michael voice clone using CosyVoice 3 (FunAudioLLM
   Fun-CosyVoice3-0.5B-2512, Apache-2.0). Voice sample:
-  voices/Michael.wav, cloned transcript-free via inference_instruct2;
-  the style templates are the engine instruct text. LLM annotation is
-  optional (enabled when LLM_BASE_URL and LLM_MODEL are set). Replaces
-  the retired Chatterbox recipe (#88).
+  voices/Michael.wav, zero-shot with the verbatim reference transcript;
+  chapters synthesize as serial chunk chains with rolling-reference
+  tone priming (#115) — each chunk after a chapter's first primes from
+  the previous chunk's tail, and each chapter resets to the canonical
+  reference. LLM annotation is optional (enabled when LLM_BASE_URL and
+  LLM_MODEL are set). Replaces the retired Chatterbox recipe (#88).
 
 min_hardware:
   gpu: true
@@ -60,7 +62,9 @@ tts:
   sample_rate: 24000      # CosyVoice 3 native output
   synthesis_mode: zero_shot  # inference_zero_shot + verbatim transcript (upstream's canonical English path); instruct2 available via this declaration for A/B
   speed: 0.9               # rendered-duration scale; the reference's brisk pace transfers in zero-shot and the ear ruled "very fast"
-  overlap_ms: 200          # Crossfade between chunks (docs: voice-recipe.md tts.overlap_ms) — the audio-level tone handoff
+  priming: true            # Rolling-reference tone handoff (#115): each chunk after a chapter's first primes from the previous chunk's tail; RECIPE_PRIMING=0 kills it
+  priming_tail_ms: 6000    # priming clip length — stays inside the engine's trained 3-10s reference range (engine/capabilities.yaml)
+  overlap_ms: 200          # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms); the tone handoff itself is priming's job (#115)
   bitrate: "192k"
   format: "mp3"
   chunk_size: 300         # Characters per TTS call
@@ -69,7 +73,7 @@ tts:
   engine_flags:           # Performance flags (#93); RECIPE_* envs are kill switches
     fp16: true            # autocast LLM + flow (bandwidth-bound LLM: halves traffic)
     trt_flow: true        # TensorRT plan for the flow estimator (fp16-mode plan; upstream cautions — ear-test gated)
-    parallel_workers: 2   # chunk synthesis workers; per-chunk seeds keep output order-independent
+    parallel_workers: 2   # chapter chains in flight (#115); chunks run serially inside a chain
 
 mastering:
   config: "mastering-chain.yaml"

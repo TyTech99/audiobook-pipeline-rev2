@@ -31,5 +31,7 @@ Docs source: `docs/data-models/voice-recipe.md` (field tables),
 | Chunk state passing / chapters as reset points (recipe-schema.md) | recipe/common/annotation.py + annotate_chapter | ✅ (#112) |
 | Metadata-only cues, reject-and-retry, declared tags only | recipe/common/annotation.py | ✅ (#112, #114) |
 | GPU or fail | worker device request + recipe cuda gate | ✅ (#101, #103) |
+| Tone handoff across chunks (design baseline 2026-11-22; docs imply via "state dependency"/"audio state" overview.md:70-73) | run.py prime_tail_slice + chapter chains; declared tts.priming / priming_tail_ms; MEASURED counters (canonical/tail/full/re-anchor) in qc-report | ✅ (#115) |
+| Chunks serial within a chapter, chapters parallel (overview.md:70-73, voice-recipe.md:308) | run.py synthesize_chains — the pool's unit of work is the chapter chain | ✅ (#115; restores the docs model by construction) |
 
 Flagged rows are decision items for the operator; none block a sample.
