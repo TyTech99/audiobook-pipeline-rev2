@@ -20,7 +20,7 @@ class StubRunner(RecipeRunner):
         self.code = code
         self.calls = []
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         self.calls.append({"image": image, "input": input_dir, "output": output_dir, "env": env})
         if self.code != 0:
             return self.code
@@ -126,6 +126,9 @@ def test_tts_worker_process_job(tmp_path):
         def lrem(self, name, count, value):
             return 0
 
+        def delete(self, name):
+            return 1
+
     class FakeHttp:
         def __init__(self):
             self.calls = []
@@ -208,6 +211,9 @@ def test_tts_worker_fails_on_nonzero_exit(tmp_path):
 
         def lrem(self, name, count, value):
             return 0
+
+        def delete(self, name):
+            return 1
 
     class FakeHttp:
         def __init__(self):
