@@ -94,10 +94,10 @@ class DockerProbeRunner(ProbeRunner):
             device = os.environ.get("GPU_DEVICE", "").strip()
             if device and device.lower() != "all":
                 kwargs["device_requests"] = [
-                    docker.types.GPURequest(device_ids=[d.strip() for d in device.split(",") if d.strip()])
+                    docker.types.DeviceRequest(device_ids=[d.strip() for d in device.split(",") if d.strip()])
                 ]
             else:
-                kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
+                kwargs["device_requests"] = [docker.types.DeviceRequest(count=-1)]
         self.client.containers.run(**kwargs)
 
     def stop_worker(self, name: str) -> None:
