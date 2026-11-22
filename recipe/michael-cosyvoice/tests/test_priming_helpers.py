@@ -12,6 +12,10 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
+# Suite-order isolation: another recipe's tests may have already cached
+# a module named "run" — purge it so THIS recipe's run.py is imported.
+sys.modules.pop("run", None)
+
 from run import (  # noqa: E402
     priming_enabled,
     prime_selection,

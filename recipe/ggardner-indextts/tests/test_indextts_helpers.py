@@ -9,8 +9,15 @@ channel that flows into emo_text.
 import sys
 import pathlib
 
+# Make run.py importable without installing the recipe package, and the
+# system annotation module (recipe/common) importable the same way the
+# recipe image does it (PYTHONPATH=<recipe root> -> common.annotation).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+
+# Suite-order isolation: another recipe's tests may have already cached
+# a module named "run" — purge it so THIS recipe's run.py is imported.
+sys.modules.pop("run", None)
 
 from common.annotation import AnnotationContract, sanitize_direction  # noqa: E402
 import run  # noqa: E402

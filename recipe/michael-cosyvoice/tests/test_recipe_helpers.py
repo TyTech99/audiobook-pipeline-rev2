@@ -9,6 +9,10 @@ import pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
+# Suite-order isolation: another recipe's tests may have already cached
+# a module named "run" — purge it so THIS recipe's run.py is imported.
+sys.modules.pop("run", None)
+
 from run import (
     chunk_text,
     normalize_for_comparison,
@@ -27,6 +31,11 @@ from run import (
     SYSTEM_PROMPT,
     ENDOFPROMPT,
 )
+
+# Bind the module object at collection time — a plain `import run`
+# inside a test body would resolve through sys.modules to whichever
+# recipe's run.py was imported last (suite-order trap).
+import run  # noqa: E402,F811
 
 
 def test_chunk_text_short():
@@ -133,7 +142,7 @@ def test_compose_instruct_uses_declared_engine_format():
 def test_synthesis_mode_and_zero_shot_prompt():
     # The declared mode is the model card's canonical zero-shot shape:
     # no space before the endofprompt token, transcript after it.
-    import run as run_module
+    run_module = run
     assert synthesis_mode() == "zero_shot"
     prompt = zero_shot_prompt_text()
     assert prompt.startswith("You are a helpful assistant.<|endofprompt|>")
@@ -162,7 +171,7 @@ def test_engine_flags_kill_switches(monkeypatch):
 def test_engine_flags_follow_the_declaration(monkeypatch):
     # #114 follow-up: recipe.yaml tts.engine_flags is the iteration lever;
     # the env kill switches still override.
-    import run as run_module
+    run_module = run
     monkeypatch.delenv("RECIPE_FP16", raising=False)
     monkeypatch.delenv("RECIPE_TRT", raising=False)
     monkeypatch.setattr(
