@@ -7,7 +7,8 @@ Runs inside the recipe Docker container:
 Stages:
   1. LLM annotation (optional, when LLM_BASE_URL + LLM_MODEL are set)
   2. CosyVoice 3 TTS generation (inference_instruct2, voice clone from
-     voices/Michael.wav, fixed seed re-applied per chunk)
+     voices/Michael.wav, fixed seed re-applied per chunk; fp16 autocast,
+     TensorRT flow plan, and parallel chunk workers per #93)
   3. Mastering (ffmpeg loudnorm + resample)
   4. Packaging (M4B with stik=2, per-chapter MP3, credits, retail sample)
 
@@ -165,6 +166,41 @@ def style_instruct(style: str) -> str:
         path = STYLES_DIR / "neutral.j2"
     instruct = " ".join(line.strip() for line in path.read_text().splitlines() if line.strip())
     return f"{SYSTEM_PROMPT} {instruct}{ENDOFPROMPT}"
+
+
+def engine_flags() -> dict[str, bool]:
+    """Engine performance flags (#93). Defaults: fp16 autocast on,
+    TensorRT flow plan on.
+
+    fp16 — upstream constructor flag (cosyvoice.py:189-224): autocasts the
+    LLM and the flow (model.py:103,136). The 0.5B Qwen token loop is
+    memory-bandwidth-bound (stock RTF ~0.7 on any GPU — 4080 ≈ 5090 with
+    GPU util <50%, upstream issue #1262), so halving memory traffic is the
+    single biggest lever. Quality gate: the sample job ear test.
+    load_trt — builds a GPU-specific TensorRT plan for the flow estimator
+    from the fp32 ONNX that ships in the weights snapshot; the plan lands
+    in the persistent model cache. With fp16 on, upstream builds the
+    fp16-mode plan and explicitly cautions it ("use at caution") — the ear
+    test gates that too. RECIPE_FP16=0 / RECIPE_TRT=0 are kill switches.
+    """
+    return {
+        "fp16": os.environ.get("RECIPE_FP16", "1") != "0",
+        "load_trt": os.environ.get("RECIPE_TRT", "1") != "0",
+    }
+
+
+def parallel_workers() -> int:
+    """Chunk-synthesis worker processes (#93).
+
+    Default 2: the 16 GB GPU 1 fits two fp16 engine instances with room
+    to spare, and per-chunk determinism (fixed seed re-applied per call)
+    makes chunk order irrelevant to output. RECIPE_PARALLEL=1 is the
+    serial kill switch; unparsable values fall back to the default.
+    """
+    try:
+        return max(1, int(os.environ.get("RECIPE_PARALLEL", "2")))
+    except ValueError:
+        return 2
 
 
 def chapter_filename(chapter_number: int) -> str:
@@ -434,31 +470,45 @@ def get_device() -> str:
     return "cpu"
 
 
-def load_tts():
-    """Load CosyVoice 3. Downloads the pinned HF snapshot on first run.
+def resolve_model_dir() -> str:
+    """Resolve the pinned CosyVoice 3 model directory.
 
-    COSYVOICE_MODEL_DIR overrides the model directory (pre-warmed cache).
+    COSYVOICE_MODEL_DIR overrides the snapshot location (pre-warmed
+    cache); otherwise the pinned HF revision downloads on first run.
+    """
+    model_dir = os.environ.get("COSYVOICE_MODEL_DIR", "").strip()
+    if model_dir:
+        return model_dir
+    from huggingface_hub import snapshot_download
+
+    log.info(
+        "Resolving CosyVoice 3 weights %s@%s...",
+        COSYVOICE_REPO,
+        COSYVOICE_REVISION[:12],
+    )
+    start = time.time()
+    model_dir = snapshot_download(COSYVOICE_REPO, revision=COSYVOICE_REVISION)
+    log.info("Weights ready in %.1fs", time.time() - start)
+    return model_dir
+
+
+def load_tts(model_dir: str, flags: dict[str, bool]):
+    """Load CosyVoice 3 with the #93 performance flags.
+
     AutoModel dispatches to the CosyVoice3 class from the model's config
-    and moves to CUDA when torch sees a GPU.
+    and moves to CUDA when torch sees a GPU. fp16 autocasts the LLM and
+    the flow; load_trt swaps the flow estimator for a TensorRT engine
+    built (once, then cached in the model dir) from the fp32 ONNX that
+    ships in the weights snapshot.
     """
     from cosyvoice.cli.cosyvoice import AutoModel
 
-    model_dir = os.environ.get("COSYVOICE_MODEL_DIR", "").strip()
-    if not model_dir:
-        from huggingface_hub import snapshot_download
-
-        log.info(
-            "Downloading CosyVoice 3 weights %s@%s on first run...",
-            COSYVOICE_REPO,
-            COSYVOICE_REVISION[:12],
-        )
-        start = time.time()
-        model_dir = snapshot_download(COSYVOICE_REPO, revision=COSYVOICE_REVISION)
-        log.info("Weights ready in %.1fs", time.time() - start)
-
-    log.info("Loading CosyVoice 3 from %s...", model_dir)
+    log.info(
+        "Loading CosyVoice 3 from %s (fp16=%s, load_trt=%s)...",
+        model_dir, flags["fp16"], flags["load_trt"],
+    )
     start = time.time()
-    model = AutoModel(model_dir=model_dir)
+    model = AutoModel(model_dir=model_dir, fp16=flags["fp16"], load_trt=flags["load_trt"])
     log.info(
         "CosyVoice 3 loaded in %.1fs (sample_rate=%d)",
         time.time() - start,
@@ -467,13 +517,15 @@ def load_tts():
     return model
 
 
-def synthesize_text(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int) -> None:
+def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int) -> None:
     """Synthesize a single text chunk to a WAV file.
 
     inference_instruct2 clones the reference voice (voices/Michael.wav)
     with no transcript needed, while the instruct text directs delivery.
     The seed is re-applied before every call so the whole take samples
-    from one RNG state: a stable narrator and a reproducible take.
+    from one RNG state — a stable narrator and a reproducible take, and
+    the property that makes chunk-level parallelism safe (#93): any
+    worker process given the same seed produces the same chunk.
     """
     import torch
     import torchaudio
@@ -490,6 +542,66 @@ def synthesize_text(model, text: str, output_wav: pathlib.Path, instruct: str, s
         wav.unsqueeze(0),
         int(getattr(model, "sample_rate", TTS_SAMPLE_RATE)),
     )
+
+
+# Pool worker state: each parallel process loads its own engine instance.
+_POOL_MODEL = None
+
+
+def _pool_init(model_dir: str, flags: dict[str, bool]) -> None:
+    global _POOL_MODEL
+    _POOL_MODEL = load_tts(model_dir, flags)
+
+
+def _pool_task(task: tuple) -> tuple[int, str | None]:
+    idx, text, out_path, instruct, seed = task
+    try:
+        generate_chunk(_POOL_MODEL, text, pathlib.Path(out_path), instruct, seed)
+        return idx, None
+    except Exception as exc:  # noqa: BLE001 - per-chunk failures fall back to silence
+        return idx, str(exc)
+
+
+def synthesize_all(
+    tasks: list[tuple],
+    model_dir: str,
+    flags: dict[str, bool],
+    n_parallel: int,
+) -> dict[int, str | None]:
+    """Synthesize (idx, text, out_path, instruct, seed) tasks (#93).
+
+    Returns {idx: error_or_None}. n_parallel <= 1 (or a single task) runs
+    in-process on one engine. n_parallel > 1 spawns worker processes that
+    each load their own engine; the parent warm-loads once first so
+    exactly-once work — the TensorRT plan build and any first-run cache
+    fill — happens before workers start and no two workers race on the
+    plan file. The warm copy is freed before the pool spawns.
+    """
+    if n_parallel <= 1 or len(tasks) < 2:
+        model = load_tts(model_dir, flags)
+        results: dict[int, str | None] = {}
+        for task in tasks:
+            idx, text, out_path, instruct, seed = task
+            try:
+                generate_chunk(model, text, pathlib.Path(out_path), instruct, seed)
+                results[idx] = None
+            except Exception as exc:  # noqa: BLE001 - per-chunk fallback
+                results[idx] = str(exc)
+        return results
+
+    import torch
+
+    log.info("Warm-up load (builds/caches the TRT plan exactly once)...")
+    warm = load_tts(model_dir, flags)
+    del warm
+    torch.cuda.empty_cache()
+
+    import multiprocessing as mp
+
+    log.info("Synthesizing %d chunks on %d workers...", len(tasks), n_parallel)
+    ctx = mp.get_context("spawn")
+    with ctx.Pool(n_parallel, initializer=_pool_init, initargs=(model_dir, flags)) as pool:
+        return {idx: err for idx, err in pool.map(_pool_task, tasks)}
 
 
 # ---------------------------------------------------------------------------
@@ -549,8 +661,14 @@ def main() -> int:
         if cover_env and pathlib.Path(cover_env).exists():
             cover_path = pathlib.Path(cover_env)
     seed = int(os.environ.get("RECIPE_SEED", str(DEFAULT_SEED)))
+    flags = engine_flags()
+    n_parallel = parallel_workers()
 
-    log.info("Book: %s by %s (%d chapters), style=%s, seed=%d", title, author, len(script["chapters"]), style, seed)
+    log.info(
+        "Book: %s by %s (%d chapters), style=%s, seed=%d, fp16=%s, trt=%s, workers=%d",
+        title, author, len(script["chapters"]), style, seed,
+        flags["fp16"], flags["load_trt"], n_parallel,
+    )
 
     # Stage 1: LLM annotation (optional)
     llm_settings = load_llm_settings()
@@ -563,18 +681,14 @@ def main() -> int:
     instruct = style_instruct(style)
     log.info("Instruct (%d chars): %s", len(instruct), instruct[:120])
 
-    # Stage 2: TTS generation
+    # Stage 2: plan every synthesis task first (annotation, hint strip,
+    # chunking), then execute the whole set in one pass — serially on one
+    # engine, or across worker processes (#93).
+    temp_dir = tempfile.mkdtemp(prefix="recipe-")
     device = get_device()
     log.info("TTS device: %s", device)
-    model = load_tts()
 
-    temp_dir = tempfile.mkdtemp(prefix="recipe-")
-    chapter_wavs: list[pathlib.Path] = []
     chapter_info: list[dict[str, Any]] = []
-    total_segments = 0
-    failed_segments = 0
-
-    # Load existing chapter checkpoints (mastered WAVs from a previous run)
     existing_checkpoints: dict[int, pathlib.Path] = {}
     for f in checkpoint_dir.glob("chapter-*.wav"):
         try:
@@ -585,6 +699,10 @@ def main() -> int:
     if existing_checkpoints:
         log.info("Loaded %d chapter checkpoints from %s", len(existing_checkpoints), checkpoint_dir)
 
+    tasks: list[tuple] = []
+    chapter_wav_lists: dict[int, list[pathlib.Path]] = {}
+    next_idx = 0
+
     for chapter in script["chapters"]:
         ch_num = chapter.get("chapter", len(chapter_info) + 1)
         ch_title = chapter.get("title", f"Chapter {ch_num}")
@@ -592,7 +710,7 @@ def main() -> int:
         if not segments:
             continue
 
-        # Check if this chapter has a checkpointed mastered WAV
+        # Checkpointed chapters skip synthesis entirely.
         if ch_num in existing_checkpoints:
             cp_wav = existing_checkpoints[ch_num]
             chapter_info.append({"chapter": ch_num, "title": ch_title, "wav": cp_wav, "mastered": cp_wav})
@@ -601,7 +719,7 @@ def main() -> int:
 
         ch_temp_dir = pathlib.Path(temp_dir) / f"ch{ch_num:03d}"
         ch_temp_dir.mkdir(parents=True, exist_ok=True)
-        seg_wavs: list[pathlib.Path] = []
+        wav_list: list[pathlib.Path] = []
 
         for i, seg in enumerate(segments):
             seg_id = seg.get("id", f"seg-{i:03d}")
@@ -623,46 +741,73 @@ def main() -> int:
             for j, chunk in enumerate(chunks):
                 wav_name = f"{seg_id}-{j:02d}.wav" if len(chunks) > 1 else f"{seg_id}.wav"
                 wav_path = ch_temp_dir / wav_name
-                try:
-                    synthesize_text(model, chunk, wav_path, instruct, seed)
-                    seg_wavs.append(wav_path)
-                    total_segments += 1
-                except Exception as exc:
-                    log.error("TTS failed for %s: %s", seg_id, exc)
-                    failed_segments += 1
-                    # Generate silence as fallback to keep pipeline moving
-                    make_silence_wav(wav_path, 1.0, TTS_SAMPLE_RATE)
-                    seg_wavs.append(wav_path)
+                tasks.append((next_idx, chunk, str(wav_path), instruct, seed))
+                wav_list.append(wav_path)
+                next_idx += 1
 
-        if seg_wavs:
-            ch_wav = ch_temp_dir / f"chapter-{ch_num:03d}.wav"
-            concat_wavs(seg_wavs, ch_wav)
-            chapter_info.append({"chapter": ch_num, "title": ch_title, "wav": ch_wav})
-            log.info("Chapter %d complete: %d segments", ch_num, len(segments))
+        chapter_wav_lists[ch_num] = wav_list
+        chapter_info.append({"chapter": ch_num, "title": ch_title, "temp_dir": ch_temp_dir})
 
-    if not chapter_info:
+    # Credits synthesize through the same task path.
+    credits_dir = pathlib.Path(temp_dir) / "credits"
+    credits_dir.mkdir(parents=True, exist_ok=True)
+    opening_text = f"{title}. By {author}. An audiobook."
+    closing_text = f"Thank you for listening to {title}."
+    opening_wav = credits_dir / "opening.wav"
+    closing_wav = credits_dir / "closing.wav"
+    opening_idx = next_idx
+    tasks.append((opening_idx, opening_text, str(opening_wav), instruct, seed))
+    next_idx += 1
+    closing_idx = next_idx
+    tasks.append((closing_idx, closing_text, str(closing_wav), instruct, seed))
+    next_idx += 1
+
+    total_segments = next_idx - 2  # chapter chunks only; credits excluded
+
+    if total_segments <= 0 and not existing_checkpoints:
         log.error("No chapters were generated")
         return 1
 
-    # Generate opening/closing credits
-    credits_dir = pathlib.Path(temp_dir) / "credits"
-    credits_dir.mkdir(parents=True, exist_ok=True)
+    # Stage 2 execution
+    model_dir = resolve_model_dir()
+    synth_start = time.time()
+    errors = synthesize_all(tasks, model_dir, flags, n_parallel)
+    synthesis_seconds = time.time() - synth_start
 
-    opening_text = f"{title}. By {author}. An audiobook."
-    closing_text = f"Thank you for listening to {title}."
+    failed_segments = 0
+    for idx in range(total_segments):
+        if errors.get(idx) is not None:
+            failed_segments += 1
+            out_path = pathlib.Path(tasks[idx][2])
+            log.error("TTS failed for %s: %s", out_path.name, errors[idx])
+            # Silence fallback keeps the pipeline moving (segment order preserved)
+            make_silence_wav(out_path, 1.0, TTS_SAMPLE_RATE)
 
-    opening_wav = credits_dir / "opening.wav"
-    closing_wav = credits_dir / "closing.wav"
-    try:
-        synthesize_text(model, opening_text, opening_wav, instruct, seed)
-    except Exception as exc:
-        log.warning("Opening credits TTS failed (%s), using silence", exc)
-        make_silence_wav(opening_wav, 2.0, TTS_SAMPLE_RATE)
-    try:
-        synthesize_text(model, closing_text, closing_wav, instruct, seed)
-    except Exception as exc:
-        log.warning("Closing credits TTS failed (%s), using silence", exc)
-        make_silence_wav(closing_wav, 2.0, TTS_SAMPLE_RATE)
+    for name, idx, wav in (
+        ("Opening", opening_idx, opening_wav),
+        ("Closing", closing_idx, closing_wav),
+    ):
+        if errors.get(idx) is not None:
+            log.warning("%s credits TTS failed (%s), using silence", name, errors[idx])
+            make_silence_wav(wav, 2.0, TTS_SAMPLE_RATE)
+
+    # Assemble per-chapter WAVs in task order — deterministic regardless of
+    # which worker synthesized which chunk.
+    for ch in chapter_info:
+        if "mastered" in ch:
+            continue
+        wav_list = chapter_wav_lists.get(ch["chapter"], [])
+        ch_temp_dir = ch.pop("temp_dir")
+        if not wav_list:
+            continue
+        ch_wav = ch_temp_dir / f"chapter-{ch['chapter']:03d}.wav"
+        concat_wavs(wav_list, ch_wav)
+        ch["wav"] = ch_wav
+        log.info("Chapter %d complete", ch["chapter"])
+
+    if not any("wav" in ch for ch in chapter_info):
+        log.error("No chapters were generated")
+        return 1
 
     # Stage 3: Mastering
     log.info("Mastering audio...")
@@ -778,6 +923,11 @@ def main() -> int:
             "mode": "inference_instruct2",
             "voice": "voices/Michael.wav",
             "seed": seed,
+            "fp16": flags["fp16"],
+            "trt_flow": flags["load_trt"],
+            "parallel_workers": n_parallel,
+            "synthesis_seconds": round(synthesis_seconds, 1),
+            "synthesis_rtf": round(synthesis_seconds / full_duration, 3) if full_duration else None,
         },
         "llm_annotation": llm_settings is not None,
         "device": device,

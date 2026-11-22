@@ -63,6 +63,10 @@ tts:
   chunk_size: 300         # Characters per TTS call
   voice: "voices/Michael.wav"
   seed: 1234              # Fixed seed, re-applied per call (deterministic takes)
+  engine_flags:           # Performance flags (#93); RECIPE_* envs are kill switches
+    fp16: true            # autocast LLM + flow (bandwidth-bound LLM: halves traffic)
+    trt_flow: true        # TensorRT plan for the flow estimator (fp16-mode plan; upstream cautions — ear-test gated)
+    parallel_workers: 2   # chunk synthesis workers; per-chunk seeds keep output order-independent
 
 mastering:
   config: "mastering-chain.yaml"

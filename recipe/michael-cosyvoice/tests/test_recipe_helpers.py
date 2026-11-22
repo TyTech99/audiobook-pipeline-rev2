@@ -12,6 +12,8 @@ from run import (
     validate_annotation,
     strip_performance_hints,
     style_instruct,
+    engine_flags,
+    parallel_workers,
     chapter_filename,
     output_layout,
     SYSTEM_PROMPT,
@@ -99,6 +101,31 @@ def test_style_instruct_flattens_lines():
     instruct = style_instruct("noir-mystery")
     assert "\n" not in instruct
     assert "gravelly" in instruct
+
+
+def test_engine_flags_default_on(monkeypatch):
+    monkeypatch.delenv("RECIPE_FP16", raising=False)
+    monkeypatch.delenv("RECIPE_TRT", raising=False)
+    assert engine_flags() == {"fp16": True, "load_trt": True}
+
+
+def test_engine_flags_kill_switches(monkeypatch):
+    monkeypatch.setenv("RECIPE_FP16", "0")
+    monkeypatch.setenv("RECIPE_TRT", "0")
+    assert engine_flags() == {"fp16": False, "load_trt": False}
+
+
+def test_parallel_workers_env(monkeypatch):
+    monkeypatch.delenv("RECIPE_PARALLEL", raising=False)
+    assert parallel_workers() == 2
+    monkeypatch.setenv("RECIPE_PARALLEL", "1")
+    assert parallel_workers() == 1
+    monkeypatch.setenv("RECIPE_PARALLEL", "8")
+    assert parallel_workers() == 8
+    monkeypatch.setenv("RECIPE_PARALLEL", "junk")
+    assert parallel_workers() == 2
+    monkeypatch.setenv("RECIPE_PARALLEL", "0")
+    assert parallel_workers() == 1
 
 
 def test_chapter_filename():
