@@ -84,7 +84,24 @@ class DockerRecipeRunner(RecipeRunner):
             raise RuntimeError(f"recipe container GPU launch failed: {exc}") from exc
         try:
             result = container.wait(timeout=7200)
-            return int(result.get("StatusCode", 1))
+            code = int(result.get("StatusCode", 1))
+            if code != 0:
+                # Preserve the recipe's dying words (#105): the container's
+                # last log lines are the only record of why it exited, and
+                # the remove() below destroys them. Surface them in the
+                # error so the job row carries the evidence.
+                try:
+                    tail = container.logs(tail=80)
+                    if isinstance(tail, bytes):
+                        tail = tail.decode("utf-8", errors="replace")
+                    tail = tail.strip()
+                except Exception:
+                    tail = ""
+                msg = f"Recipe container exited {code}"
+                if tail:
+                    msg += f"; last log lines:\n{tail}"
+                raise RuntimeError(msg)
+            return code
         finally:
             container.remove(force=True)
 
