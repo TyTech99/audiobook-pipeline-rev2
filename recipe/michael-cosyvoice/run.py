@@ -235,25 +235,15 @@ def build_m4b_from_wav(
     If cover_path is given, it is embedded as cover art.
     """
     m4b_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-        "-i", str(wav_path),
-        "-c:a", "aac", "-b:a", AAC_BITRATE, "-ar", str(PACK_SAMPLE_RATE), "-ac", "1",
-        "-brand", "M4B ",
-        "-movflags", "+faststart",
-        "-metadata", f"title={title}",
-        "-metadata", f"artist={author}",
-        "-metadata", "album_artist=Michael (CosyVoice 3)",
-        "-metadata", "genre=Audiobook",
-        "-metadata:s:v:0", "title=Cover Art",
-        "-metadata:s:v:0", "comment=Cover Art",
-    ]
-    if cover_path and cover_path.exists():
-        cmd += ["-i", str(cover_path), "-map", "0:a", "-map", "1:v", "-c:v", "mjpeg"]
-    else:
-        cmd += ["-map", "0:a"]
-
-    # Chapter markers via ffmpeg's chapter support
+    # All inputs first, then output options: ffmpeg binds options to the
+    # file that follows them, so output options placed before later -i
+    # flags get parsed as input options and the call dies with exit 234
+    # (#109). The mp4 muxer is forced because the .m4b-extension default
+    # (ipod muxer) rejects mjpeg cover streams in current ffmpeg builds.
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(wav_path)]
+    has_cover = bool(cover_path and cover_path.exists())
+    if has_cover:
+        cmd += ["-i", str(cover_path)]
     if chapters:
         chapter_file = m4b_path.with_suffix(".chapters")
         lines = ["; FFmpeg meta file", "; FORMAT chaps"]
@@ -261,16 +251,38 @@ def build_m4b_from_wav(
             start_ms = int(ch.get("start_ms", 0))
             end_ms = int(ch.get("end_ms", start_ms + 1000))
             ch_title = ch.get("title", "Chapter")
-            lines.append(f"[CHAPTER]")
-            lines.append(f"TIMEBASE=1/1000")
+            lines.append("[CHAPTER]")
+            lines.append("TIMEBASE=1/1000")
             lines.append(f"START={start_ms}")
             lines.append(f"END={end_ms}")
             lines.append(f"title={ch_title}")
         chapter_file.write_text("\n".join(lines) + "\n")
         cmd += ["-f", "ffmetadata", "-i", str(chapter_file)]
 
+    cmd += ["-f", "mp4", "-brand", "M4B "]
+    if has_cover:
+        cmd += ["-map", "0:a", "-map", "1:v", "-c:v", "mjpeg", "-disposition:v:0", "attached_pic"]
+    else:
+        cmd += ["-map", "0:a"]
+    cmd += [
+        "-c:a", "aac", "-b:a", AAC_BITRATE, "-ar", str(PACK_SAMPLE_RATE), "-ac", "1",
+        "-movflags", "+faststart",
+        "-metadata", f"title={title}",
+        "-metadata", f"artist={author}",
+        "-metadata", "album_artist=Michael (CosyVoice 3)",
+        "-metadata", "genre=Audiobook",
+    ]
+    if has_cover:
+        cmd += ["-metadata:s:v:0", "title=Cover Art", "-metadata:s:v:0", "comment=Cover Art"]
     cmd.append(str(m4b_path))
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        # Surface ffmpeg's own complaint — the captured stderr is the
+        # only real diagnosis of a packaging failure (#105/#109).
+        raise RuntimeError(
+            f"M4B ffmpeg failed ({exc.returncode}): {(exc.stderr or '').strip()[:800]}"
+        ) from exc
 
     # Patch stik=2 into the M4B (ffmpeg doesn't set this atom)
     _patch_stik(m4b_path)
