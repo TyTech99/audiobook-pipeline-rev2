@@ -46,6 +46,7 @@ from common.annotate_exec import (
     annotate_chapter,
     load_llm_settings,
     merge_annotation_stats,
+    probe_llm,
     write_annotated_script,
 )
 from common.audio import (
@@ -428,9 +429,17 @@ def main() -> int:
         log.warning("No annotation contract declared — clean text, no directions")
 
     llm_settings = load_llm_settings()
+    llm_endpoint = probe_llm(llm_settings) if llm_settings else None
+    if llm_settings and llm_endpoint:
+        if llm_endpoint["reachable"]:
+            log.info("LLM endpoint reachable from inside the container: %s", llm_settings["base_url"])
+        else:
+            log.error("LLM endpoint UNREACHABLE from inside the recipe container (%s) — "
+                      "annotation pass skipped; synthesizing with the reference's own delivery (#118)",
+                      llm_endpoint["error"])
     annotation_cues: dict[str, dict[str, Any]] = {}
     annotation_stats: dict[str, int] = {}
-    if llm_settings and contract.configured:
+    if llm_settings and contract.configured and (llm_endpoint or {}).get("reachable"):
         slots = max(1, int(llm_settings.get("slots") or 2))
         log.info("LLM annotation enabled (engine=%s, declared emotions=%s, seats=%d, model=%s)",
                  contract.engine, sorted(contract.instruct_controls), slots, llm_settings["model"])
@@ -697,6 +706,7 @@ def main() -> int:
         "llm_annotation": llm_settings is not None,
         "annotation": {
             "engine_contract": contract.engine if contract.configured else None,
+            "endpoint": llm_endpoint,
             "stats": annotation_stats,
         },
         "device": "cuda",

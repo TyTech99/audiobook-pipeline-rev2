@@ -21,7 +21,10 @@ RUN pip install --no-cache-dir typing-extensions \
     && pip install --no-cache-dir torch==2.7.0 torchaudio==2.7.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
-RUN pip install --no-cache-dir ./src
+# httpx is DECLARED, never transitive (#118): the annotation pass dials
+# the LLM endpoint from inside this container, and a missing transport
+# library fails silently as an all-neutral take without it.
+RUN pip install --no-cache-dir ./src httpx
 
 ENV PYTHONPATH=/opt/recipe
 
