@@ -136,7 +136,7 @@ def _update_source_tree(tmp_path: Path) -> Path:
     (tmp_path / "recipe").mkdir()
     (tmp_path / "recipe" / "voice.txt").write_text("voice\n")
     (tmp_path / "recipe" / "voices").mkdir()
-    (tmp_path / "recipe" / "voices" / "Michael.wav").write_bytes(b"RIFF\x00\x00fake-wav-bytes")
+    (tmp_path / "recipe" / "voices" / "Michael.wav").write_bytes(b"RIFF\x00\x00fake-wav-bytes\xff\xfe")
     (tmp_path / "deploy").mkdir()
     for name in (
         "coordinator.Dockerfile",
@@ -249,7 +249,9 @@ def test_update_node_syncs_restarts_and_keeps_operator_config(monkeypatch, tmp_p
     assert host.read(prefix + "/worker/prep.py") == "PREP = 'new'\n"
     assert host.read(prefix + "/recipe/voice.txt") == "voice\n"
     # Binary voice assets must survive the prefix copy byte-identical (#91).
-    assert host.files[prefix + "/recipe/voices/Michael.wav"] == b"RIFF\x00\x00fake-wav-bytes"
+    # The \xff\xfe tail makes the fake wav genuinely non-UTF-8, so the copy
+    # must take the bytes path (a decodeable fake would exercise nothing).
+    assert host.files[prefix + "/recipe/voices/Michael.wav"] == b"RIFF\x00\x00fake-wav-bytes\xff\xfe"
     for name in (
         "supervisor.Dockerfile",
         "worker-prep.Dockerfile",
