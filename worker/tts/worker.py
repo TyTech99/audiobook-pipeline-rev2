@@ -51,18 +51,24 @@ class DockerRecipeRunner(RecipeRunner):
             "environment": env,
             "volumes": volumes,
         }
-        # Use GPU when the host has one; otherwise run CPU-only.
-        if os.path.exists("/dev/nvidia0"):
-            device = os.environ.get("GPU_DEVICE", "").strip()
-            if device and device.lower() != "all":
-                kwargs["device_requests"] = [
-                    docker.types.DeviceRequest(
-                        device_ids=[d.strip() for d in device.split(",") if d.strip()],
-                        capabilities=[["gpu"]],
-                    )
-                ]
-            else:
-                kwargs["device_requests"] = [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
+        # Attach a GPU request when the node declares one. GPU_DEVICE (set
+        # by the supervisor from node.env) is the declaration that matters:
+        # the Docker daemon resolves device_ids on the HOST, so this worker
+        # container does not need to see any device file — and with
+        # GPU_DEVICE=1 it only holds /dev/nvidia1 anyway. The old
+        # os.path.exists('/dev/nvidia0') gate therefore never fired inside
+        # the worker and recipe containers silently ran CPU-only (#101).
+        # Bare-metal workers without GPU_DEVICE keep the presence fallback.
+        device = os.environ.get("GPU_DEVICE", "").strip()
+        if device and device.lower() != "all":
+            kwargs["device_requests"] = [
+                docker.types.DeviceRequest(
+                    device_ids=[d.strip() for d in device.split(",") if d.strip()],
+                    capabilities=[["gpu"]],
+                )
+            ]
+        elif device.lower() == "all" or (not device and os.path.exists("/dev/nvidia0")):
+            kwargs["device_requests"] = [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
         try:
             container = self.client.containers.run(**kwargs)
         except Exception as exc:
