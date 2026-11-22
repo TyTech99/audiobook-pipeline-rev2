@@ -21,6 +21,7 @@ from common.annotation import (
     build_prompt,
     extract_cues_from_response,
     parse_annotation,
+    sanitize_direction,
 )
 from common.text import first_annotation_mismatch
 
@@ -123,6 +124,95 @@ def probe_llm(llm_settings: dict[str, Any], transport=None) -> dict[str, Any]:
         return {"reachable": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
 
 
+def _chapter_direction_prompt(contract: AnnotationContract, style: str,
+                              style_desc: str, digest: str) -> str:
+    """The chapter-baseline prompt, assembled from the DECLARED vocabulary
+    (#120) — engine-neutral: the controls and word budget come from the
+    contract, never hardcoded."""
+    controls = ", ".join(contract.instruct_controls) or "steady narration"
+    return (
+        "You are setting the emotional baseline for an ENTIRE chapter of an audiobook.\n"
+        f"Style guide: {style}\n"
+        f"{style_desc}\n\n"
+        f"The narration engine accepts one delivery direction over this vocabulary: {controls}.\n"
+        f"The chapter opens:\n<<{digest}>>\n\n"
+        "Compose ONE direction phrase (at most "
+        f"{contract.max_direction_words} words) that fits the whole chapter as a steady "
+        "emotional baseline - a skilled narrator's consistent tone, not per-sentence shifts.\n"
+        "Respond with exactly one line:\nDIRECTION: <your phrase>"
+    )
+
+
+def _compose_chapter_direction(
+    chapter: dict[str, Any], contract: AnnotationContract,
+    llm_settings: dict[str, Any], style: str, style_desc: str,
+) -> tuple[str | None, dict[str, int], str | None]:
+    """One LLM call per chapter: compose the held direction. Transport
+    failure degrades to no direction (llm_errors, no retry — a dead path
+    stays dead, #118); a malformed response retries per the declaration
+    and counts as rejected when every attempt fails."""
+    stats = {"annotated": 0, "retried": 0, "rejected": 0, "llm_errors": 0,
+             "dropped_undeclared": 0, "tags_used": 0, "directions": 0}
+    texts = [str(seg.get("text", "")).strip() for seg in chapter.get("segments", [])]
+    texts = [t for t in texts if t]
+    if not texts:
+        return None, stats, None
+    digest = " ".join(texts)
+    digest = digest[:1500].rstrip() + ("..." if len(digest) > 1500 else "")
+    prompt = _chapter_direction_prompt(contract, style, style_desc, digest)
+    transport_error: str | None = None
+    attempts = 1 + max(0, contract.retries)
+    for attempt in range(attempts):
+        if attempt:
+            stats["retried"] += 1
+            log.info("Retrying chapter-direction call (attempt %d)", attempt + 1)
+        try:
+            raw = _llm_chat(llm_settings, prompt)
+        except Exception as exc:
+            transport_error = f"{type(exc).__name__}: {exc}"
+            stats["llm_errors"] += 1
+            log.warning("chapter-direction LLM call failed: %s", transport_error)
+            break
+        parsed = parse_annotation(raw)
+        raw_direction = (parsed.get("direction") or "").strip()
+        direction = sanitize_direction(raw_direction, contract.max_direction_words) if raw_direction else ""
+        if direction:
+            stats["directions"] = 1
+            return direction, stats, None
+        stats["rejected"] += 1
+        log.warning("chapter-direction attempt %d carried no usable DIRECTION line", attempt + 1)
+    return None, stats, transport_error
+
+
+def _annotate_chapter_held(
+    chapter: dict[str, Any], contract: AnnotationContract,
+    llm_settings: dict[str, Any], style: str, style_desc: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """#120: ONE direction held across the whole chapter (chapters are
+    emotional reset points), stamped on every segment's cues. On this
+    engine class the emo channel is the only non-drifting continuity
+    carrier once per-segment reference tricks are ruled out (#119)."""
+    direction, stats, error = _compose_chapter_direction(
+        chapter, contract, llm_settings, style, style_desc)
+    cues_map: dict[str, dict[str, Any]] = {}
+    for i, seg in enumerate(chapter.get("segments", [])):
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        seg_id = str(seg.get("id", f"seg-{i:03d}"))
+        cues: dict[str, Any] | None = (
+            {"tags": [], "dropped_undeclared": 0, "direction": direction}
+            if direction else None
+        )
+        cues_map[seg_id] = {"cues": cues, "state_after": direction, "error": error}
+        if cues:
+            stats["annotated"] += 1
+    if direction:
+        log.info("Chapter-held direction %r stamped on %d segments",
+                 direction, stats["annotated"])
+    return cues_map, stats
+
+
 def annotate_chapter(
     chapter: dict[str, Any],
     contract: AnnotationContract,
@@ -135,7 +225,11 @@ def annotate_chapter(
     """Annotate one chapter: segments serial with state passing, chapter
     as emotional reset point, reject-and-retry per the declaration, then
     fall back clean and count. Cues are metadata keyed by segment ID —
-    the returned text is never kept."""
+    the returned text is never kept. When the contract declares
+    direction_granularity: chapter, ONE held direction is composed for
+    the whole chapter and stamped on every segment (#120)."""
+    if contract.direction_granularity == "chapter":
+        return _annotate_chapter_held(chapter, contract, llm_settings, style, style_desc)
     cues_map: dict[str, dict[str, Any]] = {}
     stats = {"annotated": 0, "retried": 0, "rejected": 0, "llm_errors": 0,
              "dropped_undeclared": 0, "tags_used": 0, "directions": 0}

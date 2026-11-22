@@ -67,6 +67,7 @@ class AnnotationContract:
     max_direction_words: int = 12     # in-distribution instruct2 directions are SHORT (#114)
     punctuation_rules: tuple[str, ...] = ()
     retries: int = 2
+    direction_granularity: str = "segment"   # "chapter": ONE held direction per chapter (#120)
 
     @property
     def configured(self) -> bool:
@@ -97,6 +98,9 @@ class AnnotationContract:
             max_words = max(1, int(instruct.get("max_direction_words", 12)))
         except (TypeError, ValueError):
             max_words = 12
+        granularity = str(block.get("direction_granularity", "segment") or "segment").strip().lower()
+        if granularity not in ("segment", "chapter"):
+            granularity = "segment"
         return cls(
             engine=str(data.get("engine", "")).strip(),
             inline_tags=tags,
@@ -105,6 +109,7 @@ class AnnotationContract:
             max_direction_words=max_words,
             punctuation_rules=tuple(str(r) for r in block.get("punctuation_rules", [])),
             retries=max(0, int(block.get("retries", 2))),
+            direction_granularity=granularity,
         )
 
     def prompt_vocabulary(self) -> str:

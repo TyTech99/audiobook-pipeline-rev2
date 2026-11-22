@@ -65,7 +65,10 @@ tts:
   overlap_ms: 200        # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms)
   duration_factor: 1.0   # INVERTED vs CosyVoice speed: >1 slows, <1 speeds; 1.0 keeps Gardner's own pace
   emo_alpha: 0.8        # emotion conditioning strength [0,1] (the engine's demonstrated mid grade)
-  chaining: true        # tone carry (#119): chapter chains start on the canonical clip; later chunks prime from the last good take (engine truncates any reference to 15s)
+  chaining: false       # #119 verdict: chained engine-output references drift the voice within ~4 hops — off; canonical clip every chunk
+  segment_tokens: 80    # #120: explicit English budget (upstream default 120 is Chinese-calibrated, issue #775; official recommended range 80-200)
+  interval_silence_ms: 300   # #120: deliberate inter-segment pause inside a call (engine default 200)
+  seam_pause_ms: 300    # #120: chunk joins become crossfaded reader pauses (fade-out, pause, fade-in)
   bitrate: "192k"
   format: "mp3"
   engine_flags:

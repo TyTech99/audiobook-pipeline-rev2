@@ -180,6 +180,58 @@ def next_reference(last_good: str | None, chaining: bool) -> str:
     return str(VOICE_PATH)
 
 
+def declared_segment_tokens() -> int:
+    """#120: the explicit English token budget per engine segment. Upstream's
+    120 default is Chinese-calibrated (issue #775: English runs ~3.1 tokens/s
+    vs Chinese ~4.3, so the same budget yields ~1.4x longer English audio,
+    brushing the ~25-30s stability ceiling); the official recommended range
+    is 80-200."""
+    try:
+        value = int((MANIFEST.get("tts") or {}).get("segment_tokens", 80))
+    except (TypeError, ValueError):
+        value = 80
+    return max(20, min(200, value))
+
+
+def declared_interval_silence_ms() -> int:
+    """#120: the pause the engine inserts between its internal segments —
+    a deliberate reader's pause, not the 200ms default splice."""
+    try:
+        value = int((MANIFEST.get("tts") or {}).get("interval_silence_ms", 300))
+    except (TypeError, ValueError):
+        value = 300
+    return max(0, min(2000, value))
+
+
+def declared_seam_pause_ms() -> int:
+    """#120: silence inserted at chunk joins so a seam reads as a reader's
+    paragraph pause (crossfaded on both edges)."""
+    try:
+        value = int((MANIFEST.get("tts") or {}).get("seam_pause_ms", 300))
+    except (TypeError, ValueError):
+        value = 300
+    return max(0, min(2000, value))
+
+
+def interleave_seam_pauses(wav_list: list[pathlib.Path], temp_dir: pathlib.Path,
+                           chapter: int) -> list[pathlib.Path]:
+    """#120: chunk joins become deliberate reader pauses — a declared
+    silence is placed between consecutive chunk wavs so the crossfade
+    reads as fade-out, pause, fade-in instead of a hard splice. Gap wavs
+    land in the chapter temp dir (removed with it at the end of the run)."""
+    gap_ms = declared_seam_pause_ms()
+    if len(wav_list) <= 1 or gap_ms <= 0:
+        return wav_list
+    seq: list[pathlib.Path] = []
+    for i, wav in enumerate(wav_list):
+        seq.append(wav)
+        if i + 1 < len(wav_list):
+            gap = temp_dir / f"seam-{int(chapter):03d}-{i:03d}.wav"
+            make_silence_wav(gap, gap_ms / 1000.0, TTS_SAMPLE_RATE)
+            seq.append(gap)
+    return seq
+
+
 def style_text(style: str) -> str:
     """The raw style guide (styles/*.j2) — fed to the ANNOTATOR as the
     emotional baseline; the engine itself never sees it."""
@@ -244,6 +296,22 @@ def load_tts(model_dir: str, bf16: bool, use_qwen_emo: bool):
     return model
 
 
+def _infer_guarded(model, kwargs: dict[str, Any]) -> None:
+    """Run model.infer with the engine's RuntimeWarnings escalated to hard
+    failures (#120): the force-split and max_mel-truncation warnings mark
+    takes that exceed the stability budget — a fluent-but-wrong or
+    truncated take must fail loudly into segment_failures, never ship
+    silently (upstream issue #775: no other signal fires)."""
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        try:
+            model.infer(**kwargs)
+        except Warning as exc:
+            raise RuntimeError(f"engine stability warning: {exc}") from exc
+
+
 def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | None, seed: int,
                    emo_alpha: float, duration_factor: float, use_qwen_emo: bool,
                    spk_prompt: str | None = None) -> None:
@@ -252,7 +320,9 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | 
     fidelity). A missing/failed emotion-text channel degrades to the
     reference clip's own delivery — counted, never fatal. spk_prompt is
     the tone-carry reference (#119): the last good take's path when
-    chaining, else None = the canonical clip."""
+    chaining, else None = the canonical clip. The English token budget and
+    interval silence are declared values passed explicitly (#120) — the
+    engine's defaults are Chinese-calibrated."""
     import torch
 
     emo_note = f" emo_text={direction!r}" if direction else ""
@@ -268,11 +338,13 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | 
         duration_factor=duration_factor,
         use_random=False,
         verbose=False,
+        max_text_tokens_per_segment=declared_segment_tokens(),
+        interval_silence=declared_interval_silence_ms(),
     )
     if direction and use_qwen_emo:
         kwargs.update(use_emo_text=True, emo_text=direction, emo_alpha=emo_alpha)
     try:
-        model.infer(**kwargs)
+        _infer_guarded(model, kwargs)
     except Exception:
         if not (direction and use_qwen_emo):
             raise
@@ -281,7 +353,7 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | 
         kwargs.pop("use_emo_text", None)
         kwargs.pop("emo_text", None)
         kwargs.pop("emo_alpha", None)
-        model.infer(**kwargs)
+        _infer_guarded(model, kwargs)
 
 
 def _new_chain_counters() -> dict[str, int]:
@@ -613,9 +685,10 @@ def main() -> int:
         if not wav_list:
             continue
         ch_wav = ch["temp_dir"] / f"chapter-{ch['chapter']:03d}.wav"
-        crossfade_join(wav_list, ch_wav, declared_overlap_ms())
+        joined_list = interleave_seam_pauses(wav_list, ch["temp_dir"], ch["chapter"])
+        crossfade_join(joined_list, ch_wav, declared_overlap_ms())
         ch["wav"] = ch_wav
-        log.info("Chapter %d complete", ch["chapter"])
+        log.info("Chapter %d complete (seam_pause=%dms)", ch["chapter"], declared_seam_pause_ms())
 
     if not any("wav" in ch for ch in chapter_info):
         log.error("No chapters were generated")
@@ -743,6 +816,10 @@ def main() -> int:
             "emo_alpha": emo_alpha,
             "parallel_workers": n_parallel,
             "chaining": chaining,
+            "segment_tokens": declared_segment_tokens(),
+            "interval_silence_ms": declared_interval_silence_ms(),
+            "seam_pause_ms": declared_seam_pause_ms(),
+            "direction_granularity": contract.direction_granularity,
             "synthesis_seconds": round(synthesis_seconds, 1),
             "synthesis_rtf": round(synthesis_seconds / full_duration, 3) if full_duration else None,
         },

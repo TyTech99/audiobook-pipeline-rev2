@@ -75,6 +75,23 @@ class TestContract:
         assert not empty.configured
         assert empty.declared_tag_set == frozenset()
 
+    def test_direction_granularity_defaults_to_segment(self, contract: AnnotationContract):
+        assert contract.direction_granularity == "segment"
+
+    def test_direction_granularity_chapter_declared(self, tmp_path: pathlib.Path):
+        text = CAPABILITIES.replace(
+            "  retries: 2\n", "  retries: 2\n  direction_granularity: chapter\n")
+        path = tmp_path / "capabilities.yaml"
+        path.write_text(text)
+        assert AnnotationContract.from_capabilities(path).direction_granularity == "chapter"
+
+    def test_unknown_granularity_falls_back_to_segment(self, tmp_path: pathlib.Path):
+        text = CAPABILITIES.replace(
+            "  retries: 2\n", "  retries: 2\n  direction_granularity: nonsense\n")
+        path = tmp_path / "capabilities.yaml"
+        path.write_text(text)
+        assert AnnotationContract.from_capabilities(path).direction_granularity == "segment"
+
     def test_prompt_vocabulary_is_generated_from_declaration(self, contract: AnnotationContract):
         vocab = contract.prompt_vocabulary()
         assert "[breath]" in vocab and "[laughter]" in vocab

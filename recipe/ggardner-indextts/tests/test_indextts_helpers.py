@@ -75,7 +75,63 @@ def test_sanitize_direction_clamps_to_word_budget():
 
 
 def test_chaining_declaration_read_from_recipe_yaml():
-    assert run.chaining_enabled() is True
+    assert run.chaining_enabled() is False   # #119 verdict: chained references drift — declaration off
+
+
+def test_contract_declares_chapter_held_directions():
+    contract = AnnotationContract.from_capabilities(CAPABILITIES)
+    assert contract.direction_granularity == "chapter"   # #120: one held direction per chapter
+
+
+def test_engine_declarations_for_120():
+    assert run.declared_segment_tokens() == 80        # explicit English budget (upstream #775)
+    assert run.declared_interval_silence_ms() == 300
+    assert run.declared_seam_pause_ms() == 300
+
+
+def test_infer_guarded_escalates_runtime_warning():
+    import warnings
+
+    class UnstableEngine:
+        def infer(self, **kwargs):
+            warnings.warn("The tokens length of segment exceeds limit: 120", RuntimeWarning)
+
+    raised = False
+    try:
+        run._infer_guarded(UnstableEngine(), {})
+    except RuntimeError as exc:
+        raised = "tokens length" in str(exc)
+    assert raised
+
+
+def test_infer_guarded_passes_clean_engine():
+    class CleanEngine:
+        def __init__(self):
+            self.seen = None
+
+        def infer(self, **kwargs):
+            self.seen = kwargs
+
+    eng = CleanEngine()
+    run._infer_guarded(eng, {"a": 1})
+    assert eng.seen == {"a": 1}
+
+
+def test_interleave_seam_pauses(monkeypatch, tmp_path):
+    chdir = tmp_path / "ch001"
+    chdir.mkdir()
+    monkeypatch.setattr(run, "make_silence_wav", lambda p, s, r: p.write_bytes(b"sil"))
+    wavs = [tmp_path / "a.wav", tmp_path / "b.wav", tmp_path / "c.wav"]
+    seq = run.interleave_seam_pauses(wavs, chdir, 1)
+    assert len(seq) == 5
+    assert seq[0] == wavs[0] and seq[2] == wavs[1] and seq[4] == wavs[2]
+    assert seq[1].exists() and seq[3].exists()
+
+
+def test_interleave_seam_pauses_disabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(run, "declared_seam_pause_ms", lambda: 0)
+    wavs = [tmp_path / "a.wav", tmp_path / "b.wav"]
+    assert run.interleave_seam_pauses(wavs, tmp_path, 1) == wavs
 
 
 def test_next_reference_carries_the_last_good_take():

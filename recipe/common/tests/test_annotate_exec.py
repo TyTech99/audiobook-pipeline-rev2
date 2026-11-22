@@ -141,3 +141,92 @@ def test_write_annotated_script_records_error(tmp_path):
     data = json.loads(path.read_text())
     assert data["segments"]["s1"]["error"] == "ConnectionRefusedError: refused"
     assert data["segments"]["s1"]["cues"] is None
+
+
+# --- chapter-held directions (#120) -----------------------------------------
+
+
+CHAPTER_CONTRACT = AnnotationContract(
+    engine="indextts2.5",
+    instruct_format="{direction}",
+    instruct_controls=("calm", "grave"),
+    max_direction_words=8,
+    retries=0,
+    direction_granularity="chapter",
+)
+
+MULTI = {"segments": [
+    {"id": "s1", "content_type": "body_text", "text": "First."},
+    {"id": "s2", "content_type": "body_text", "text": "Second."},
+]}
+
+
+def test_chapter_held_stamps_one_direction_on_every_segment(monkeypatch):
+    def one_direction(llm_settings, prompt):
+        assert "ENTIRE chapter" in prompt
+        assert "calm, grave" in prompt        # the DECLARED vocabulary rides the prompt
+        return "DIRECTION: calm, steady and grave"
+
+    monkeypatch.setattr(annotate_exec, "_llm_chat", one_direction)
+    cues_map, stats = annotate_chapter(
+        MULTI, CHAPTER_CONTRACT, LLM_SETTINGS, "neutral", "",
+        PROMPT_PATH, EXAMPLES_PATH,
+    )
+    assert stats["directions"] == 1
+    assert stats["annotated"] == 2
+    assert cues_map["s1"]["cues"]["direction"] == "calm, steady and grave"
+    assert cues_map["s2"]["cues"]["direction"] == "calm, steady and grave"
+    assert cues_map["s1"]["error"] is None
+
+
+def test_chapter_held_transport_failure_degrades_clean(monkeypatch):
+    def dead(llm_settings, prompt):
+        raise ConnectionRefusedError("refused")
+
+    monkeypatch.setattr(annotate_exec, "_llm_chat", dead)
+    cues_map, stats = annotate_chapter(
+        MULTI, CHAPTER_CONTRACT, LLM_SETTINGS, "neutral", "",
+        PROMPT_PATH, EXAMPLES_PATH,
+    )
+    assert stats["llm_errors"] == 1
+    assert stats["annotated"] == 0
+    assert cues_map["s1"]["cues"] is None
+    assert "ConnectionRefusedError" in cues_map["s1"]["error"]
+
+
+def test_chapter_held_malformed_response_counts_rejected(monkeypatch):
+    monkeypatch.setattr(annotate_exec, "_llm_chat", lambda s, p: "no labeled line at all")
+    cues_map, stats = annotate_chapter(
+        MULTI, CHAPTER_CONTRACT, LLM_SETTINGS, "neutral", "",
+        PROMPT_PATH, EXAMPLES_PATH,
+    )
+    assert stats["rejected"] == 1
+    assert stats["annotated"] == 0
+    assert cues_map["s1"]["cues"] is None
+
+
+def test_chapter_held_sanitizes_the_direction(monkeypatch):
+    monkeypatch.setattr(annotate_exec, "_llm_chat",
+                        lambda s, p: "DIRECTION: calm [junk] <evil> and quite gravely steady forever more")
+    cues_map, stats = annotate_chapter(
+        MULTI, CHAPTER_CONTRACT, LLM_SETTINGS, "neutral", "",
+        PROMPT_PATH, EXAMPLES_PATH,
+    )
+    direction = cues_map["s1"]["cues"]["direction"]
+    assert "[" not in direction and "<" not in direction
+    assert len(direction.split()) <= 8       # contract word budget
+
+
+def test_segment_granularity_still_runs_the_serial_loop(monkeypatch):
+    calls = []
+
+    def per_segment(llm_settings, prompt):
+        calls.append(prompt)
+        return "DIRECTION: calm\nSTATE: calm\nTEXT: First."
+
+    monkeypatch.setattr(annotate_exec, "_llm_chat", per_segment)
+    cues_map, stats = annotate_chapter(
+        MULTI, CONTRACT, LLM_SETTINGS, "neutral", "",
+        PROMPT_PATH, EXAMPLES_PATH,
+    )
+    assert len(calls) == 2                   # one call per segment, as before
