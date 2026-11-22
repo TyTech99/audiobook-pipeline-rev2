@@ -86,7 +86,7 @@ PACK_SAMPLE_RATE = 44100
 MP3_BITRATE = "192k"
 AAC_BITRATE = "96k"
 MAX_CHARS_PER_TTS = 300  # keep individual TTS calls short for quality
-RETAIL_SAMPLE_SECONDS = 75
+RETAIL_SAMPLE_SECONDS = 60  # iteration convention (Ty, 2026-11-22): 60s samples
 
 # Pinned CosyVoice 3 weights (Apache-2.0). The revision is part of the
 # recipe's reproducibility contract: same input + same recipe = same model.
@@ -215,23 +215,32 @@ def style_description(style: str) -> str:
 
 
 def engine_flags() -> dict[str, bool]:
-    """Engine performance flags (#93). Defaults: fp16 autocast on,
-    TensorRT flow plan on.
+    """Engine performance flags (#93), declared in recipe.yaml
+    (tts.engine_flags) with RECIPE_FP16 / RECIPE_TRT env kill switches.
+
+    The declaration is the iteration lever (#114 follow-up: fp16/TRT can
+    be flipped per experiment without code edits); the envs override for
+    one-off runs. Defaults on when neither declares.
 
     fp16 — upstream constructor flag (cosyvoice.py:189-224): autocasts the
     LLM and the flow (model.py:103,136). The 0.5B Qwen token loop is
     memory-bandwidth-bound (stock RTF ~0.7 on any GPU — 4080 ≈ 5090 with
     GPU util <50%, upstream issue #1262), so halving memory traffic is the
-    single biggest lever. Quality gate: the sample job ear test.
+    single biggest lever. Quality gate: the ear test.
     load_trt — builds a GPU-specific TensorRT plan for the flow estimator
     from the fp32 ONNX that ships in the weights snapshot; the plan lands
     in the persistent model cache. With fp16 on, upstream builds the
-    fp16-mode plan and explicitly cautions it ("use at caution") — the ear
-    test gates that too. RECIPE_FP16=0 / RECIPE_TRT=0 are kill switches.
+    fp16-mode plan and explicitly cautions it ("use at caution") — the
+    ear test gates that too.
     """
+    declared = ((MANIFEST.get("tts") or {}).get("engine_flags")) or {}
+    fp16_default = "True" if declared.get("fp16", True) else "False"
+    trt_default = "True" if declared.get("trt_flow", True) else "False"
+    fp16 = os.environ.get("RECIPE_FP16", fp16_default)
+    trt = os.environ.get("RECIPE_TRT", trt_default)
     return {
-        "fp16": os.environ.get("RECIPE_FP16", "1") != "0",
-        "load_trt": os.environ.get("RECIPE_TRT", "1") != "0",
+        "fp16": fp16 not in ("0", "False"),
+        "load_trt": trt not in ("0", "False"),
     }
 
 

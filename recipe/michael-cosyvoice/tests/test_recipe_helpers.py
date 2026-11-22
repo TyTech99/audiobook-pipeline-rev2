@@ -140,6 +140,21 @@ def test_engine_flags_kill_switches(monkeypatch):
     assert engine_flags() == {"fp16": False, "load_trt": False}
 
 
+def test_engine_flags_follow_the_declaration(monkeypatch):
+    # #114 follow-up: recipe.yaml tts.engine_flags is the iteration lever;
+    # the env kill switches still override.
+    import run as run_module
+    monkeypatch.delenv("RECIPE_FP16", raising=False)
+    monkeypatch.delenv("RECIPE_TRT", raising=False)
+    monkeypatch.setattr(
+        run_module, "MANIFEST",
+        {"tts": {"engine_flags": {"fp16": False, "trt_flow": False}}},
+    )
+    assert engine_flags() == {"fp16": False, "load_trt": False}
+    monkeypatch.setenv("RECIPE_TRT", "True")  # env overrides the declaration
+    assert engine_flags() == {"fp16": False, "load_trt": True}
+
+
 def test_parallel_workers_env(monkeypatch):
     monkeypatch.delenv("RECIPE_PARALLEL", raising=False)
     assert parallel_workers() == 2
