@@ -16,7 +16,13 @@ RUN git clone --recursive https://github.com/QwenAudio/CosyVoice.git src \
     && git checkout 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc \
     && git submodule update --init --recursive
 
-RUN pip install --no-cache-dir torch==2.7.0 torchaudio==2.7.0 \
+# typing-extensions first, from PyPI: the pytorch cu128 index serves a
+# typing-extensions wheel with inconsistent metadata (Name: typing_extensions),
+# which makes pip discard it and try the sdist, whose flit_core build dep is
+# absent from that index. Installing the valid PyPI wheel first satisfies
+# torch's requirement so the cu128-only step never re-resolves it.
+RUN pip install --no-cache-dir typing-extensions \
+    && pip install --no-cache-dir torch==2.7.0 torchaudio==2.7.0 \
         --index-url https://download.pytorch.org/whl/cu128
 
 COPY recipe/michael-cosyvoice/requirements.txt /tmp/requirements.txt
