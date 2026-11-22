@@ -192,15 +192,16 @@ def engine_flags() -> dict[str, bool]:
 def parallel_workers() -> int:
     """Chunk-synthesis worker processes (#93).
 
-    Default 2: the 16 GB GPU 1 fits two fp16 engine instances with room
-    to spare, and per-chunk determinism (fixed seed re-applied per call)
-    makes chunk order irrelevant to output. RECIPE_PARALLEL=1 is the
-    serial kill switch; unparsable values fall back to the default.
+    Default 3 (operator-set 2026-11-22, up from 2 after the 5-min sample
+    verified 2 workers stable at ~9GB on the 16 GB GPU 1; 3 fits ~13.5GB).
+    Per-chunk determinism (fixed seed re-applied per call) makes chunk
+    order irrelevant to output. RECIPE_PARALLEL=1 is the serial kill
+    switch; unparsable values fall back to the default.
     """
     try:
-        return max(1, int(os.environ.get("RECIPE_PARALLEL", "2")))
+        return max(1, int(os.environ.get("RECIPE_PARALLEL", "3")))
     except ValueError:
-        return 2
+        return 3
 
 
 def chapter_filename(chapter_number: int) -> str:

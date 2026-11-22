@@ -117,13 +117,13 @@ def test_engine_flags_kill_switches(monkeypatch):
 
 def test_parallel_workers_env(monkeypatch):
     monkeypatch.delenv("RECIPE_PARALLEL", raising=False)
-    assert parallel_workers() == 2
+    assert parallel_workers() == 3
     monkeypatch.setenv("RECIPE_PARALLEL", "1")
     assert parallel_workers() == 1
     monkeypatch.setenv("RECIPE_PARALLEL", "8")
     assert parallel_workers() == 8
     monkeypatch.setenv("RECIPE_PARALLEL", "junk")
-    assert parallel_workers() == 2
+    assert parallel_workers() == 3
     monkeypatch.setenv("RECIPE_PARALLEL", "0")
     assert parallel_workers() == 1
 
