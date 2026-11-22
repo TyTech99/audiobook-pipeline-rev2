@@ -376,6 +376,43 @@ def make_silence_wav(path: pathlib.Path, seconds: float, sample_rate: int = PACK
     subprocess.run(cmd, check=True, capture_output=True, text=True)
 
 
+def crossfade_join(wav_paths: list[pathlib.Path], output_path: pathlib.Path, overlap_ms: int) -> None:
+    """Join chunk WAVs with an acrossfade per the docs' tts.overlap_ms
+    (voice-recipe.md): butt-joining independently synthesized chunks
+    leaves audible seams and abrupt tone handoffs between segments.
+
+    Pairwise ffmpeg acrossfade (tri curves); a failed crossfade degrades
+    to a plain concat for that join — continuity degrades, the job never
+    dies on it.
+    """
+    if not wav_paths:
+        raise ValueError("no wavs to join")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if len(wav_paths) == 1:
+        shutil.copyfile(wav_paths[0], output_path)
+        return
+    d = max(1, overlap_ms) / 1000.0
+    current = wav_paths[0]
+    for i, nxt in enumerate(wav_paths[1:]):
+        joined = output_path.with_suffix(f".xf{i:03d}.tmp.wav")
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(current), "-i", str(nxt),
+            "-filter_complex",
+            f"acrossfade=d={d:.3f}:c1=tri:c2=tri",
+            joined,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            log.warning("crossfade join failed at pair %d; plain concat", i)
+            concat_wavs([current, nxt], joined)
+        if current != wav_paths[0]:
+            current.unlink(missing_ok=True)
+        current = joined
+    shutil.move(str(current), str(output_path))
+
+
 def concat_wavs(inputs: list[pathlib.Path], output: pathlib.Path) -> None:
     """Concatenate WAV files using ffmpeg."""
     if not inputs:
@@ -404,17 +441,36 @@ def get_audio_duration(path: pathlib.Path) -> float:
     return float(result.stdout.strip())
 
 
+def _room_tone_filter() -> str:
+    """Room tone insertion per the docs' mastering.room_tone_ms
+    (voice-recipe.md: head at chapter start, tail at chapter end)."""
+    rt = ((MANIFEST.get("mastering") or {}).get("room_tone_ms")) or {}
+    head_ms = max(0, int(rt.get("head", 0)))
+    tail_ms = max(0, int(rt.get("tail", 0)))
+    parts = []
+    if head_ms:
+        parts.append(f"adelay={head_ms}:all=1")
+    if tail_ms:
+        parts.append(f"apad=pad_dur={tail_ms / 1000.0:.3f}")
+    return ",".join(parts)
+
+
 def master_wav(input_path: pathlib.Path, output_path: pathlib.Path) -> None:
     """Apply mastering chain: loudnorm + resample to 44.1k mono.
 
     Target I=-18 LUFS: the documented ACX range is -23 to -18
     (docs/data-models/voice-recipe.md mastering field table); -16 sat
     above (louder than) the permitted ceiling. True peak -3 dB per ACX.
+    Room tone at chapter boundaries per the docs' room_tone_ms.
     """
+    af = f"loudnorm=I={MASTER_TARGET_LUFS}:TP=-3:LRA=11,aresample={PACK_SAMPLE_RATE}"
+    room_tone = _room_tone_filter()
+    if room_tone:
+        af += f",{room_tone}"
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
-        "-af", f"loudnorm=I={MASTER_TARGET_LUFS}:TP=-3:LRA=11,aresample={PACK_SAMPLE_RATE}",
+        "-af", af,
         "-ac", "1",
         str(output_path),
     ]
@@ -780,6 +836,24 @@ def zero_shot_prompt_text() -> str:
     return f"{SYSTEM_PROMPT}{ENDOFPROMPT}{transcript}"
 
 
+def declared_overlap_ms() -> int:
+    """Chunk crossfade per the docs' tts.overlap_ms (default 200ms)."""
+    try:
+        return max(0, int((MANIFEST.get("tts") or {}).get("overlap_ms", 200)))
+    except (TypeError, ValueError):
+        return 200
+
+
+def declared_speed() -> float:
+    """TTS speed scale from the declaration (tts.speed, default 1.0).
+    The reference's own pace transfers in zero-shot mode; the speed
+    parameter scales the rendered duration when the ear rules it."""
+    try:
+        return max(0.5, min(2.0, float((MANIFEST.get("tts") or {}).get("speed", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
+
+
 def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int) -> None:
     """Synthesize a single text chunk to a WAV file.
 
@@ -797,9 +871,9 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, se
     log.info("TTS: %d chars -> %s", len(text), output_wav.name)
     torch.manual_seed(seed)
     if synthesis_mode() == "zero_shot":
-        chunks = list(model.inference_zero_shot(text, zero_shot_prompt_text(), str(VOICE_PATH), stream=False))
+        chunks = list(model.inference_zero_shot(text, zero_shot_prompt_text(), str(VOICE_PATH), stream=False, speed=declared_speed()))
     else:
-        chunks = list(model.inference_instruct2(text, instruct, str(VOICE_PATH), stream=False))
+        chunks = list(model.inference_instruct2(text, instruct, str(VOICE_PATH), stream=False, speed=declared_speed()))
     pieces = [c["tts_speech"] for c in chunks if c.get("tts_speech") is not None]
     if not pieces:
         raise RuntimeError("CosyVoice produced no audio")
@@ -1152,7 +1226,9 @@ def main() -> int:
         if not wav_list:
             continue
         ch_wav = ch_temp_dir / f"chapter-{ch['chapter']:03d}.wav"
-        concat_wavs(wav_list, ch_wav)
+        # Crossfade joins per the docs' tts.overlap_ms — the rendered-audio
+        # tone handoff between chunks and segments (voice-recipe.md).
+        crossfade_join(wav_list, ch_wav, declared_overlap_ms())
         ch["wav"] = ch_wav
         log.info("Chapter %d complete", ch["chapter"])
 

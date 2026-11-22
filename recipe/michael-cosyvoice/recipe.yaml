@@ -59,6 +59,8 @@ styles:
 tts:
   sample_rate: 24000      # CosyVoice 3 native output
   synthesis_mode: zero_shot  # inference_zero_shot + verbatim transcript (upstream's canonical English path); instruct2 available via this declaration for A/B
+  speed: 0.9               # rendered-duration scale; the reference's brisk pace transfers in zero-shot and the ear ruled "very fast"
+  overlap_ms: 200          # Crossfade between chunks (docs: voice-recipe.md tts.overlap_ms) — the audio-level tone handoff
   bitrate: "192k"
   format: "mp3"
   chunk_size: 300         # Characters per TTS call
@@ -74,6 +76,9 @@ mastering:
   target_rms_db: -16.0    # LUFS integrated (ACX: -23 to -18)
   max_peak_db: -3.0
   max_noise_floor_db: -60
+  room_tone_ms:
+    head: 1000            # 1–5 seconds of room tone at chapter start (docs: voice-recipe.md)
+    tail: 3000            # 1–5 seconds of room tone at chapter end (docs: voice-recipe.md)
 
 packaging:
   config: "packaging.yaml"
