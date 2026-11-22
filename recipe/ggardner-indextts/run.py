@@ -687,6 +687,12 @@ def main() -> int:
         ch_wav = ch["temp_dir"] / f"chapter-{ch['chapter']:03d}.wav"
         joined_list = interleave_seam_pauses(wav_list, ch["temp_dir"], ch["chapter"])
         crossfade_join(joined_list, ch_wav, declared_overlap_ms())
+        try:
+            in_durs = [round(get_audio_duration(p), 2) for p in joined_list]
+            log.info("Join diagnostics ch%s: %d inputs, durations=%s, output=%.2fs",
+                     ch["chapter"], len(joined_list), in_durs, get_audio_duration(ch_wav))
+        except Exception as exc:  # noqa: BLE001 - diagnostics never fail the job
+            log.warning("Join diagnostics failed: %s", exc)
         ch["wav"] = ch_wav
         log.info("Chapter %d complete (seam_pause=%dms)", ch["chapter"], declared_seam_pause_ms())
 
