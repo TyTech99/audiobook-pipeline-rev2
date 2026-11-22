@@ -14,14 +14,20 @@ Stages:
      keyed by segment ID. Segments serial with state passing inside a
      chapter; chapters are emotional reset points and annotate in
      parallel bounded by the declared LLM seats.
-  2. IndexTTS-2.5 synthesis: zero-shot cloning from the single
-     reference clip (voices/ggardner.wav — timbre AND its natural
-     delivery). Each chunk's annotation direction flows verbatim into
-     the engine's emo_text channel (its bundled QwenEmotion translates
-     to the 8-dim vector); emo_alpha grades intensity; duration_factor
-     1.0 keeps the reference's own pace. Parallelism is per CHAPTER
-     CHAIN — chapters in parallel, chunks serial within each (the
-     documented model). The seed is re-applied per call.
+  2. IndexTTS-2.5 synthesis: zero-shot cloning from the reference
+     clip (voices/ggardner.wav — timbre AND its natural delivery).
+     Tone carry (#119): each chapter chain starts at the canonical
+     reference (chapter = emotional reset point) and every later chunk
+     primes from the last good take — the engine officially does not
+     model prosody across segment boundaries, so the reference channel
+     is the only tone carrier (the engine head-truncates any reference
+     to 15 s, bounding each prime). Each chunk's annotation direction
+     flows verbatim into the engine's emo_text channel (its bundled
+     QwenEmotion translates to the 8-dim vector); emo_alpha grades
+     intensity; duration_factor 1.0 keeps the reference's own pace.
+     Parallelism is per CHAPTER CHAIN — chapters in parallel, chunks
+     serial within each (the documented model). The seed is re-applied
+     per call.
   3. Mastering (ffmpeg loudnorm to -18 LUFS + room tone).
   4. Packaging (M4B with stik=2 + nero chapters, per-chapter MP3s,
      credits, retail sample).
@@ -154,6 +160,26 @@ def parallel_workers() -> int:
         return 2
 
 
+def chaining_enabled() -> bool:
+    """Tone carry (#119): the tts.chaining declaration with a
+    RECIPE_CHAINING env kill switch. With chaining off, every chunk
+    re-anchors on the canonical clip (the pre-#119 behavior)."""
+    declared = (MANIFEST.get("tts") or {}).get("chaining", True)
+    env = os.environ.get("RECIPE_CHAINING", "1" if declared else "0")
+    return env not in ("0", "false", "False")
+
+
+def next_reference(last_good: str | None, chaining: bool) -> str:
+    """The speaker reference for the next chunk: the last good take when
+    tone carry is on and one exists, else the canonical clip. The engine
+    officially does not model prosody across segment boundaries (HF model
+    card) and head-truncates any reference to 15 s (infer_v2_5.py:627),
+    which bounds each prime. Pure — unit-tested without torch."""
+    if chaining and last_good:
+        return last_good
+    return str(VOICE_PATH)
+
+
 def style_text(style: str) -> str:
     """The raw style guide (styles/*.j2) — fed to the ANNOTATOR as the
     emotional baseline; the engine itself never sees it."""
@@ -219,18 +245,23 @@ def load_tts(model_dir: str, bf16: bool, use_qwen_emo: bool):
 
 
 def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | None, seed: int,
-                   emo_alpha: float, duration_factor: float, use_qwen_emo: bool) -> None:
+                   emo_alpha: float, duration_factor: float, use_qwen_emo: bool,
+                   spk_prompt: str | None = None) -> None:
     """Synthesize one chunk. The seed is re-applied before every call so
     the take is reproducible. use_random stays off (it degrades cloning
     fidelity). A missing/failed emotion-text channel degrades to the
-    reference clip's own delivery — counted, never fatal."""
+    reference clip's own delivery — counted, never fatal. spk_prompt is
+    the tone-carry reference (#119): the last good take's path when
+    chaining, else None = the canonical clip."""
     import torch
 
     emo_note = f" emo_text={direction!r}" if direction else ""
+    if spk_prompt and spk_prompt != str(VOICE_PATH):
+        emo_note = f" chained<-{pathlib.Path(spk_prompt).name}" + emo_note
     log.info("TTS: %d chars -> %s%s", len(text), output_wav.name, emo_note)
     torch.manual_seed(seed)
     kwargs: dict[str, Any] = dict(
-        spk_audio_prompt=str(VOICE_PATH),
+        spk_audio_prompt=str(spk_prompt or VOICE_PATH),
         text=text,
         lang="EN",
         output_path=str(output_wav),
@@ -254,27 +285,39 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | 
 
 
 def _new_chain_counters() -> dict[str, int]:
-    return {"segments": 0, "with_direction": 0, "neutral": 0, "emo_fallback": 0}
+    return {"segments": 0, "with_direction": 0, "neutral": 0, "emo_fallback": 0,
+            "chained": 0, "re_anchor": 0}
 
 
 def _run_chain(model, chain: list[tuple], use_qwen_emo: bool, max_words: int,
-               emo_alpha: float, duration_factor: float) -> tuple[dict[int, str | None], dict[str, int]]:
+               emo_alpha: float, duration_factor: float,
+               chaining: bool) -> tuple[dict[int, str | None], dict[str, int]]:
     """One chapter's chunks serially (#115 pool shape; chapters are the
-    unit of parallelism). Every chunk uses the canonical reference —
-    timbre and its delivery — with the segment's annotation direction
-    steering emotion via emo_text."""
+    unit of parallelism). Tone carry (#119): the chain starts at the
+    canonical reference (chapter = emotional reset point), every later
+    chunk primes from the last good take — the engine does not model
+    prosody across boundaries, so the reference channel is the only tone
+    carrier. A failed chunk does not break the chain: the next chunk
+    primes from the most recent successful take."""
     results: dict[int, str | None] = {}
     counts = _new_chain_counters()
+    last_good: str | None = None
     for idx, text, direction, out_path, seed in chain:
         counts["segments"] += 1
         if direction:
             counts["with_direction"] += 1
         else:
             counts["neutral"] += 1
+        ref = next_reference(last_good, chaining)
+        if ref == str(VOICE_PATH):
+            counts["re_anchor"] += 1
+        else:
+            counts["chained"] += 1
         try:
             generate_chunk(model, text, pathlib.Path(out_path), direction, seed,
-                           emo_alpha, duration_factor, use_qwen_emo)
+                           emo_alpha, duration_factor, use_qwen_emo, spk_prompt=ref)
             results[idx] = None
+            last_good = out_path
         except Exception as exc:  # noqa: BLE001 - per-chunk fallback
             results[idx] = str(exc)
             counts["emo_fallback"] += 1
@@ -290,16 +333,17 @@ def _pool_init(model_dir: str, bf16: bool, use_qwen_emo: bool) -> None:
 
 
 def _pool_chain(args: tuple) -> tuple[dict[int, str | None], dict[str, int]]:
-    chain, use_qwen_emo, max_words, emo_alpha, duration_factor = args
+    chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining = args
     try:
-        return _run_chain(_POOL_MODEL, chain, use_qwen_emo, max_words, emo_alpha, duration_factor)
+        return _run_chain(_POOL_MODEL, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining)
     except Exception as exc:  # noqa: BLE001 - a dead engine fails its whole chain
         return {task[0]: str(exc) for task in chain}, _new_chain_counters()
 
 
 def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int,
                        use_qwen_emo: bool, max_words: int,
-                       emo_alpha: float, duration_factor: float) -> tuple[dict[int, str | None], dict[str, int]]:
+                       emo_alpha: float, duration_factor: float,
+                       chaining: bool) -> tuple[dict[int, str | None], dict[str, int]]:
     """Chapters in parallel (one chain per worker process), chunks serial
     within each — the documented parallelism model."""
     if n_parallel <= 1 or len(chains) <= 1:
@@ -307,7 +351,7 @@ def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int
         results: dict[int, str | None] = {}
         counts = _new_chain_counters()
         for chain in chains:
-            r, c = _run_chain(model, chain, use_qwen_emo, max_words, emo_alpha, duration_factor)
+            r, c = _run_chain(model, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining)
             results.update(r)
             for key, value in c.items():
                 counts[key] = counts.get(key, 0) + value
@@ -316,11 +360,12 @@ def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int
     import multiprocessing as mp
 
     total = sum(len(chain) for chain in chains)
-    log.info("Synthesizing %d chunks across %d chapter chains on %d workers...", total, len(chains), n_parallel)
+    log.info("Synthesizing %d chunks across %d chapter chains on %d workers (chaining=%s)...",
+             total, len(chains), n_parallel, chaining)
     ctx = mp.get_context("spawn")
     with ctx.Pool(n_parallel, initializer=_pool_init, initargs=(model_dir, bf16_enabled(), use_qwen_emo)) as pool:
         outputs = pool.map(_pool_chain, [
-            (chain, use_qwen_emo, max_words, emo_alpha, duration_factor) for chain in chains
+            (chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining) for chain in chains
         ])
     results = {}
     counts = _new_chain_counters()
@@ -417,10 +462,11 @@ def main() -> int:
     n_parallel = parallel_workers()
     emo_alpha = declared_emo_alpha()
     duration_factor = declared_speed()
+    chaining = chaining_enabled()
 
-    log.info("Book: %s by %s (%d chapters), style=%s, seed=%d, bf16=%s, qwen_emo=%s, workers=%d, emo_alpha=%.2f, duration_factor=%.2f",
+    log.info("Book: %s by %s (%d chapters), style=%s, seed=%d, bf16=%s, qwen_emo=%s, workers=%d, emo_alpha=%.2f, duration_factor=%.2f, chaining=%s",
              title, author, len(script["chapters"]), style, seed, bf16, use_qwen_emo,
-             n_parallel, emo_alpha, duration_factor)
+             n_parallel, emo_alpha, duration_factor, chaining)
 
     contract = AnnotationContract.from_capabilities(CAPABILITIES_PATH)
     style_rich = style_text(style)
@@ -546,7 +592,7 @@ def main() -> int:
     synth_start = time.time()
     errors, chain_counts = synthesize_chains(
         chains, model_dir, n_parallel, use_qwen_emo,
-        contract.max_direction_words, emo_alpha, duration_factor)
+        contract.max_direction_words, emo_alpha, duration_factor, chaining)
     synthesis_seconds = time.time() - synth_start
 
     failed_segments = 0
@@ -696,6 +742,7 @@ def main() -> int:
             "duration_factor": duration_factor,
             "emo_alpha": emo_alpha,
             "parallel_workers": n_parallel,
+            "chaining": chaining,
             "synthesis_seconds": round(synthesis_seconds, 1),
             "synthesis_rtf": round(synthesis_seconds / full_duration, 3) if full_duration else None,
         },
