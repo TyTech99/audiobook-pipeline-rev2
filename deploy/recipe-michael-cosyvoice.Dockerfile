@@ -28,9 +28,10 @@ RUN pip install --no-cache-dir typing-extensions \
 COPY recipe/michael-cosyvoice/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-ENV PYTHONPATH=/opt/cosyvoice/src:/opt/cosyvoice/src/third_party/Matcha-TTS
+ENV PYTHONPATH=/opt/cosyvoice/src:/opt/cosyvoice/src/third_party/Matcha-TTS:/opt/recipe
 
 COPY recipe/michael-cosyvoice /opt/recipe/michael-cosyvoice
+COPY recipe/common /opt/recipe/common
 
 ENV RECIPE_DIR=/opt/recipe/michael-cosyvoice
 ENTRYPOINT ["python", "/opt/recipe/michael-cosyvoice/run.py"]

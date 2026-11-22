@@ -3,16 +3,21 @@
 import sys
 import pathlib
 
-# Make run.py importable without installing the recipe package.
+# Make run.py importable without installing the recipe package, and the
+# system annotation module (recipe/common) importable the same way the
+# recipe image does it (PYTHONPATH=<recipe root> -> common.annotation).
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from run import (
     chunk_text,
     normalize_for_comparison,
     validate_annotation,
     first_annotation_mismatch,
-    strip_performance_hints,
-    style_instruct,
+    style_base,
+    CAPABILITIES_PATH,
+    SYSTEM_PROMPT,
+    ENDOFPROMPT,
     engine_flags,
     parallel_workers,
     chapter_filename,
@@ -84,42 +89,43 @@ def test_validate_annotation_empty_source():
     assert validate_annotation("", "anything") is True
 
 
-def test_strip_performance_hints_removes_hint_brackets():
-    assert strip_performance_hints("Hello [pause] world") == "Hello world"
-    assert strip_performance_hints("[emphasis] Wait...") == "Wait..."
-    assert strip_performance_hints("A [softly] quiet [whisper] line.") == "A quiet line."
+def test_style_base_is_raw_direction_text():
+    base = style_base("neutral")
+    assert base.startswith("Even delivery")
+    assert SYSTEM_PROMPT not in base
+    assert ENDOFPROMPT not in base
 
 
-def test_strip_performance_hints_keeps_engine_tags():
-    # [breath]/[laughter] are engine-native inline tags, not annotation
-    # hints — they must survive the strip (walk phase will emit them).
-    text = "He drew a [breath] and went on."
-    assert strip_performance_hints(text) == text
-    text2 = "She nearly [laughter] laughed."
-    assert strip_performance_hints(text2) == text2
+def test_style_base_unknown_style_falls_back_to_neutral():
+    assert style_base("does-not-exist") == style_base("neutral")
 
 
-def test_strip_performance_hints_all_hints_returns_original():
-    # Stripping everything would empty the segment; the original is kept.
-    text = "[pause][emphasis]"
-    assert strip_performance_hints(text) == text
+def test_style_base_flattens_lines():
+    base = style_base("noir-mystery")
+    assert "\n" not in base
+    assert "gravelly" in base
 
 
-def test_style_instruct_wraps_in_engine_format():
-    instruct = style_instruct("neutral")
-    assert instruct.startswith(SYSTEM_PROMPT + " ")
-    assert instruct.endswith(ENDOFPROMPT)
-    assert "Even delivery" in instruct
+def test_engine_contract_declares_cosyvoice_tags():
+    # The declaration the SYSTEM reads (recipe.yaml -> engine/capabilities.yaml):
+    # CosyVoice 3's real inline tags plus the instruct channel format.
+    from common.annotation import AnnotationContract
+    contract = AnnotationContract.from_capabilities(CAPABILITIES_PATH)
+    assert contract.engine == "cosyvoice3"
+    assert contract.declared_tag_set == frozenset({"[breath]", "[laughter]"})
+    assert "{direction}" in contract.instruct_format
+    assert "emotions" in contract.instruct_controls
 
 
-def test_style_instruct_unknown_style_falls_back_to_neutral():
-    assert style_instruct("does-not-exist") == style_instruct("neutral")
-
-
-def test_style_instruct_flattens_lines():
-    instruct = style_instruct("noir-mystery")
-    assert "\n" not in instruct
-    assert "gravelly" in instruct
+def test_compose_instruct_uses_declared_engine_format():
+    # Trace: declaration -> prompt/compose behavior. The per-segment
+    # instruct wraps per the engine's declared format (#112).
+    from common.annotation import AnnotationContract, compose_instruct
+    contract = AnnotationContract.from_capabilities(CAPABILITIES_PATH)
+    out = compose_instruct(contract, style_base("neutral"), "grave and low")
+    assert out.startswith("You are a helpful assistant. ")
+    assert out.endswith(ENDOFPROMPT)
+    assert "Even delivery" in out and "grave and low" in out
 
 
 def test_engine_flags_default_on(monkeypatch):

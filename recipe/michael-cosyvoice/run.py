@@ -5,17 +5,22 @@ Runs inside the recipe Docker container:
   /output <- audiobook package (m4b/, mp3/, metadata.json, qc-report.json)
 
 Stages:
-  1. LLM annotation (optional, when LLM_BASE_URL + LLM_MODEL are set)
+  1. LLM annotation (optional, when LLM_BASE_URL + LLM_MODEL are set):
+     contract-driven from the engine's declared capabilities (#112) —
+     the prompt is assembled from capabilities + markup examples + style
+     + previous chunk state + chunk text; annotations are METADATA ONLY
+     (cues keyed by segment ID, the clean script is the single text
+     authority); chunks that fail word validation are rejected and
+     retried; segments run serially with state passing inside a chapter,
+     chapters are emotional reset points and annotate in parallel
+     bounded by the declared LLM seats.
   2. CosyVoice 3 TTS generation (inference_instruct2, voice clone from
      voices/Michael.wav, fixed seed re-applied per chunk; fp16 autocast,
-     TensorRT flow plan, and parallel chunk workers per #93)
+     TensorRT flow plan, and parallel chunk workers per #93). The TTS
+     input is composed from the CLEAN text plus cues (declared engine
+     tags inline; per-segment instruct from the style base + direction).
   3. Mastering (ffmpeg loudnorm + resample)
   4. Packaging (M4B with stik=2, per-chapter MP3, credits, retail sample)
-
-The MVP path synthesizes plain text (annotation hints are stripped before
-TTS). CosyVoice 3's native markup ([breath], [laughter], instruct control)
-is documented in engine/markup-examples.md and lands in the TTS stage when
-the annotation layer starts emitting engine markup.
 """
 
 from __future__ import annotations
@@ -34,6 +39,18 @@ import tempfile
 import time
 from typing import Any
 
+import yaml
+
+from common.annotation import (
+    AnnotationContract,
+    AnnotationRejected,
+    build_prompt,
+    compose_instruct,
+    compose_tts_text,
+    extract_cues_from_response,
+    parse_annotation,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("recipe")
 
@@ -42,6 +59,22 @@ VOICE_PATH = RECIPE_DIR / "voices" / "Michael.wav"
 STYLES_DIR = RECIPE_DIR / "styles"
 INPUT_DIR = pathlib.Path(os.environ.get("INPUT_DIR", "/input"))
 OUTPUT_DIR = pathlib.Path(os.environ.get("OUTPUT_DIR", "/output"))
+
+
+def recipe_manifest() -> dict[str, Any]:
+    """The recipe's own declaration (recipe.yaml) — paths are read from
+    here, never hardcoded, so the engine axis stays declarative (#112)."""
+    try:
+        return yaml.safe_load((RECIPE_DIR / "recipe.yaml").read_text()) or {}
+    except Exception:
+        return {}
+
+
+MANIFEST = recipe_manifest()
+ENGINE_MANIFEST = MANIFEST.get("engine") or {}
+CAPABILITIES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("capabilities", "engine/capabilities.yaml")
+ANNOTATION_PROMPT_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("annotation_prompt", "engine/annotation-prompt.j2")
+MARKUP_EXAMPLES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("markup_examples", "engine/markup-examples.md")
 
 # CosyVoice 3 outputs 24 kHz mono; we master to 44.1 kHz for packaging.
 TTS_SAMPLE_RATE = 24000
@@ -156,36 +189,25 @@ def first_annotation_mismatch(source_text: str, annotated_text: str) -> str | No
     return None
 
 
-def strip_performance_hints(text: str) -> str:
-    """Remove LLM performance-hint brackets the engine would read aloud.
+def style_base(style: str) -> str:
+    """The raw performance-style delivery direction (styles/*.j2).
 
-    The annotation stage (optional) may add hint markers like [pause] or
-    [emphasis]. The MVP synthesis path feeds plain text: none of these hint
-    markers are CosyVoice 3 inline tags ([breath], [laughter] are, and are
-    deliberately NOT in the annotation vocabulary), so all hint brackets
-    are stripped before TTS, together with the space that preceded them.
-    """
-    stripped = re.sub(
-        r"\s*\[(?:pause|emphasis|softly|whisper|slow|fast)\]",
-        "",
-        text,
-    ).strip()
-    return stripped or text
-
-
-def style_instruct(style: str) -> str:
-    """Build the inference_instruct2 instruction for a performance style.
-
-    The style templates (styles/*.j2) are the engine instruction: a
-    natural-language delivery direction wrapped in the model's instruct2
-    format — the Qwen system prompt, the direction, and <|endofprompt|>.
-    Unknown styles fall back to neutral.
+    The instruct2 wrapping is done by the system annotation layer
+    (compose_instruct) per the engine's declared instruct format — the
+    recipe no longer wraps it itself (#112).
     """
     path = STYLES_DIR / f"{style}.j2"
     if not path.exists():
         path = STYLES_DIR / "neutral.j2"
-    instruct = " ".join(line.strip() for line in path.read_text().splitlines() if line.strip())
-    return f"{SYSTEM_PROMPT} {instruct}{ENDOFPROMPT}"
+    return " ".join(line.strip() for line in path.read_text().splitlines() if line.strip())
+
+
+def style_description(style: str) -> str:
+    """The style's declared description from recipe.yaml."""
+    for entry in MANIFEST.get("styles", []):
+        if entry.get("name") == style:
+            return str(entry.get("description", ""))
+    return ""
 
 
 def engine_flags() -> dict[str, bool]:
@@ -424,70 +446,122 @@ def load_llm_settings() -> dict[str, Any] | None:
     }
 
 
-def annotate_segment(
-    text: str,
-    style: str,
-    llm_settings: dict[str, Any],
-    content_type: str = "body_text",
-) -> str:
-    """Call LLM to add light performance hints to a segment.
-
-    Falls back to the original text if the LLM call fails or the
-    response doesn't preserve source words.
-    """
+def _llm_chat(llm_settings: dict[str, Any], user_prompt: str) -> str:
+    """One chat completion against the declared LLM endpoint."""
     import httpx
 
     root = llm_settings["base_url"].rstrip("/")
     if not root.endswith("/v1"):
         root += "/v1"
     url = f"{root}/chat/completions"
-
     headers = {"Content-Type": "application/json"}
     if llm_settings["api_key"]:
         headers["Authorization"] = f"Bearer {llm_settings['api_key']}"
-
-    prompt = f"""You are an audiobook performance director. Add light performance hints
-(pauses, emphasis, tone) to the following text for a {style} narration style.
-Content type: {content_type}
-
-Rules:
-- Keep ALL original words in their original order.
-- You may add brief parenthetical hints like [pause], [emphasis], [softly].
-- Do NOT change, add, or remove any source words.
-- Return ONLY the annotated text, no explanation.
-
-Text:
-{text}"""
-
     body = {
         "model": llm_settings["model"],
         "temperature": 0.3,
         "messages": [
-            {"role": "system", "content": "You annotate text for audiobook narration. Preserve all source words exactly."},
-            {"role": "user", "content": prompt},
+            {
+                "role": "system",
+                "content": (
+                    "You annotate audiobook narration for a TTS engine. "
+                    "You preserve every source word exactly."
+                ),
+            },
+            {"role": "user", "content": user_prompt},
         ],
     }
-
-    try:
-        with httpx.Client(timeout=llm_settings["timeout"]) as client:
-            resp = client.post(url, headers=headers, json=body)
-            resp.raise_for_status()
-            data = resp.json()
-            content = data["choices"][0]["message"]["content"]
-            if isinstance(content, list):
-                content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
-            content = str(content).strip()
-            if validate_annotation(text, content):
-                log.info("LLM annotated segment (%d chars)", len(content))
-                return content
-            bad = first_annotation_mismatch(text, content)
-            log.warning(
-                "LLM annotation failed validation (first mismatch: %r), using original text",
-                bad,
+    with httpx.Client(timeout=llm_settings["timeout"]) as client:
+        resp = client.post(url, headers=headers, json=body)
+        resp.raise_for_status()
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        if isinstance(content, list):
+            content = "".join(
+                p.get("text", "") if isinstance(p, dict) else str(p) for p in content
             )
-    except Exception as exc:
-        log.warning("LLM annotation failed (%s), using original text", exc)
-    return text
+        return str(content).strip()
+
+
+def annotate_chapter(
+    chapter: dict[str, Any],
+    contract: AnnotationContract,
+    llm_settings: dict[str, Any],
+    style: str,
+    style_desc: str,
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    """Annotate one chapter's segments (#112, per docs/tasks/recipe-schema.md).
+
+    Segments run SERIALLY with the previous segment's ending state passed
+    into the next prompt; the chapter is an emotional reset point. Each
+    segment: prompt assembled from the engine's declared capabilities +
+    markup examples + style + previous state + chunk text; response parsed
+    to cues; a chunk whose words do not match the source is REJECTED AND
+    RETRIED (contract.retries), then falls back to no-cues and is counted.
+
+    Returns ({seg_id: {"cues": ..., "state_after": ...}}, stats). The
+    returned text is never kept — cues are metadata keyed by segment ID.
+    """
+    cues_map: dict[str, dict[str, Any]] = {}
+    stats = {"annotated": 0, "retried": 0, "rejected": 0,
+             "dropped_undeclared": 0, "tags_used": 0, "directions": 0}
+    state: str | None = None  # chapter = emotional reset point
+    for i, seg in enumerate(chapter.get("segments", [])):
+        text = str(seg.get("text", "")).strip()
+        if not text:
+            continue
+        seg_id = str(seg.get("id", f"seg-{i:03d}"))
+        content_type = str(seg.get("content_type", "body_text"))
+        prompt = build_prompt(
+            contract, ANNOTATION_PROMPT_PATH, MARKUP_EXAMPLES_PATH,
+            style=style, style_description=style_desc,
+            content_type=content_type, previous_state=state, chunk_text=text,
+        )
+        cues: dict[str, Any] | None = None
+        parsed: dict[str, Any] | None = None
+        attempts = 1 + max(0, contract.retries)
+        for attempt in range(attempts):
+            if attempt:
+                stats["retried"] += 1
+                log.info("Retrying annotation for %s (attempt %d)", seg_id, attempt + 1)
+            try:
+                raw = _llm_chat(llm_settings, prompt)
+            except Exception as exc:
+                log.warning("LLM call failed for %s: %s", seg_id, exc)
+                break
+            parsed = parse_annotation(raw)
+            try:
+                cues = extract_cues_from_response(text, parsed, contract)
+            except AnnotationRejected:
+                bad = first_annotation_mismatch(text, (parsed or {}).get("text") or "")
+                log.warning(
+                    "Rejected annotation for %s (first mismatch: %r), attempt %d/%d",
+                    seg_id, bad, attempt + 1, attempts,
+                )
+                continue
+            break
+        if cues is None:
+            stats["rejected"] += 1
+        else:
+            stats["annotated"] += 1
+            stats["dropped_undeclared"] += int(cues.get("dropped_undeclared", 0))
+            stats["tags_used"] += len(cues.get("tags", []))
+            if cues.get("direction"):
+                stats["directions"] += 1
+            state = (parsed.get("state") or state) if parsed else state
+            log.info(
+                "Annotated %s (%d tags, direction=%s, state=%s)",
+                seg_id, len(cues.get("tags", [])),
+                "yes" if cues.get("direction") else "no",
+                (parsed.get("state") or "-") if parsed else "-",
+            )
+        cues_map[seg_id] = {"cues": cues, "state_after": state}
+    return cues_map, stats
+
+
+def _merge_annotation_stats(target: dict[str, int], chapter_stats: dict[str, int]) -> None:
+    for key, value in chapter_stats.items():
+        target[key] = target.get(key, 0) + value
 
 
 # ---------------------------------------------------------------------------
@@ -717,16 +791,23 @@ def main() -> int:
         flags["fp16"], flags["load_trt"], n_parallel,
     )
 
-    # Stage 1: LLM annotation (optional)
+    # Stage 1 setup: LLM annotation — the SYSTEM layer builds the prompt
+    # from the engine's DECLARED capabilities (#112); this recipe only
+    # declares the engine (recipe.yaml -> engine/capabilities.yaml) and
+    # its styles. The style base is the instruct backbone; per-segment
+    # directions layer on top of it.
     llm_settings = load_llm_settings()
-    if llm_settings:
-        log.info("LLM annotation enabled (model=%s)", llm_settings["model"])
+    contract = AnnotationContract.from_capabilities(CAPABILITIES_PATH)
+    style_desc = style_description(style)
+    base_instruct = style_base(style)
+    if contract.configured:
+        default_instruct = compose_instruct(contract, base_instruct, None)
     else:
-        log.info("LLM annotation disabled (LLM_BASE_URL/LLM_MODEL not set), using clean text")
-
-    # The style template is the engine instruct text for this take.
-    instruct = style_instruct(style)
-    log.info("Instruct (%d chars): %s", len(instruct), instruct[:120])
+        # No declared contract: keep the engine's legacy static instruct.
+        default_instruct = f"{SYSTEM_PROMPT} {base_instruct}{ENDOFPROMPT}"
+    log.info("Instruct base (%d chars): %s", len(default_instruct), default_instruct[:120])
+    annotation_cues: dict[str, dict[str, Any]] = {}
+    annotation_stats: dict[str, int] = {}
 
     # Stage 2: plan every synthesis task first (annotation, hint strip,
     # chunking), then execute the whole set in one pass — serially on one
@@ -745,6 +826,55 @@ def main() -> int:
             continue
     if existing_checkpoints:
         log.info("Loaded %d chapter checkpoints from %s", len(existing_checkpoints), checkpoint_dir)
+
+    # Stage 1 execution: annotate every non-checkpointed chapter BEFORE
+    # task planning — chapters in parallel bounded by the declared LLM
+    # seats, segments serial within a chapter with state passing (docs:
+    # recipe-schema.md Chunk Strategy). Cues are metadata keyed by
+    # segment ID; the clean script stays the single text authority.
+    if llm_settings and contract.configured:
+        slots = max(1, int(llm_settings.get("slots") or 2))
+        log.info(
+            "LLM annotation enabled (engine=%s, declared tags=%s, seats=%d, model=%s)",
+            contract.engine, sorted(contract.declared_tag_set), slots, llm_settings["model"],
+        )
+        chapters_to_annotate = [
+            ch for ch in script["chapters"]
+            if ch.get("segments") and ch.get("chapter") not in existing_checkpoints
+        ]
+        if chapters_to_annotate:
+            if slots == 1 or len(chapters_to_annotate) == 1:
+                for ch in chapters_to_annotate:
+                    cues_map, stats = annotate_chapter(ch, contract, llm_settings, style, style_desc)
+                    annotation_cues.update(cues_map)
+                    _merge_annotation_stats(annotation_stats, stats)
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=min(slots, len(chapters_to_annotate))) as pool:
+                    results = pool.map(
+                        lambda ch: annotate_chapter(ch, contract, llm_settings, style, style_desc),
+                        chapters_to_annotate,
+                    )
+                    for cues_map, stats in results:
+                        annotation_cues.update(cues_map)
+                        _merge_annotation_stats(annotation_stats, stats)
+            log.info("Annotation pass complete: %s", annotation_stats)
+            annotated_path = OUTPUT_DIR / "annotated-script.json"
+            annotated_path.write_text(json.dumps(
+                {
+                    "engine": contract.engine,
+                    "segments": {
+                        seg_id: {"cues": entry.get("cues"), "state_after": entry.get("state_after")}
+                        for seg_id, entry in annotation_cues.items()
+                    },
+                },
+                indent=2,
+            ))
+            log.info("Annotated-script cues for %d segments -> %s", len(annotation_cues), annotated_path)
+    elif llm_settings:
+        log.info("LLM set but the engine declares no annotation contract — clean text")
+    else:
+        log.info("LLM annotation disabled (LLM_BASE_URL/LLM_MODEL not set), using clean text")
 
     tasks: list[tuple] = []
     chapter_wav_lists: dict[int, list[pathlib.Path]] = {}
@@ -773,22 +903,27 @@ def main() -> int:
             text = seg.get("text", "").strip()
             if not text:
                 continue
-            content_type = seg.get("content_type", "body_text")
 
-            # Annotate if LLM is configured
-            if llm_settings:
-                text = annotate_segment(text, style, llm_settings, content_type)
+            # Engine input composed from the CLEAN text plus this
+            # segment's cues (#112): declared inline tags only, never a
+            # second text copy. No cues -> the clean text as written.
+            entry = annotation_cues.get(seg_id) or {}
+            cues = entry.get("cues") or {}
+            tts_text = compose_tts_text(text, cues)
 
-            # Strip performance hints for TTS (MVP feeds plain text;
-            # the hint vocabulary contains no CosyVoice inline tags)
-            tts_text = strip_performance_hints(text)
+            # Per-segment instruct: style base plus the cue direction,
+            # wrapped per the engine's declared instruct format.
+            if contract.configured:
+                seg_instruct = compose_instruct(contract, base_instruct, cues.get("direction"))
+            else:
+                seg_instruct = default_instruct
 
             # Chunk long text
             chunks = chunk_text(tts_text)
             for j, chunk in enumerate(chunks):
                 wav_name = f"{seg_id}-{j:02d}.wav" if len(chunks) > 1 else f"{seg_id}.wav"
                 wav_path = ch_temp_dir / wav_name
-                tasks.append((next_idx, chunk, str(wav_path), instruct, seed))
+                tasks.append((next_idx, chunk, str(wav_path), seg_instruct, seed))
                 wav_list.append(wav_path)
                 next_idx += 1
 
@@ -803,10 +938,10 @@ def main() -> int:
     opening_wav = credits_dir / "opening.wav"
     closing_wav = credits_dir / "closing.wav"
     opening_idx = next_idx
-    tasks.append((opening_idx, opening_text, str(opening_wav), instruct, seed))
+    tasks.append((opening_idx, opening_text, str(opening_wav), default_instruct, seed))
     next_idx += 1
     closing_idx = next_idx
-    tasks.append((closing_idx, closing_text, str(closing_wav), instruct, seed))
+    tasks.append((closing_idx, closing_text, str(closing_wav), default_instruct, seed))
     next_idx += 1
 
     total_segments = next_idx - 2  # chapter chunks only; credits excluded
@@ -977,6 +1112,10 @@ def main() -> int:
             "synthesis_rtf": round(synthesis_seconds / full_duration, 3) if full_duration else None,
         },
         "llm_annotation": llm_settings is not None,
+        "annotation": {
+            "engine_contract": contract.engine if contract.configured else None,
+            "stats": annotation_stats,
+        },
         "device": device,
         "elapsed_seconds": round(time.time() - start_time, 1),
     }

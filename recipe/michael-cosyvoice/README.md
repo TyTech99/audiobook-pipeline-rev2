@@ -75,5 +75,5 @@ PYTHONPATH=. python3 -m pytest tests/
 ```
 
 Tests cover pure helpers (`chunk_text`, `validate_annotation`,
-`strip_performance_hints`, `style_instruct`, ...) and do not require
+`style_base`, engine-contract loading, ...) and do not require
 torch or cosyvoice to be installed.

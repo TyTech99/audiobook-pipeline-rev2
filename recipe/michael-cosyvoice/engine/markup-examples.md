@@ -28,11 +28,11 @@ paper (§5.6), timbre itself is NOT instruct-controllable.
     She tried not to [laughter] laugh at the absurdity of it.
 
 `[laughter]` and `[breath]` are special tokens in CosyVoice's frontend —
-natively interpreted, not read aloud. The MVP annotation vocabulary does
-not emit them: its hint markers (`[pause]`, `[emphasis]`, ...) are
-stripped before TTS (`run.py::strip_performance_hints`). The annotation
-layer starts emitting these two tags when the walk phase wires engine
-markup into the TTS stage.
+natively interpreted, not read aloud. The annotation layer emits them
+per the engine's declared contract (`annotation_contract` in
+capabilities.yaml, read by recipe/common/annotation.py, #112); only
+these two declared tags survive into the TTS input, and any undeclared
+bracket is dropped with a count before synthesis.
 
 ## Emphasis
 
