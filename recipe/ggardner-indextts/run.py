@@ -40,6 +40,7 @@ import logging
 import os
 import pathlib
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -213,23 +214,34 @@ def declared_seam_pause_ms() -> int:
     return max(0, min(2000, value))
 
 
-def interleave_seam_pauses(wav_list: list[pathlib.Path], temp_dir: pathlib.Path,
-                           chapter: int) -> list[pathlib.Path]:
-    """#120: chunk joins become deliberate reader pauses — a declared
-    silence is placed between consecutive chunk wavs so the crossfade
-    reads as fade-out, pause, fade-in instead of a hard splice. Gap wavs
-    land in the chapter temp dir (removed with it at the end of the run)."""
-    gap_ms = declared_seam_pause_ms()
-    if len(wav_list) <= 1 or gap_ms <= 0:
+def prepend_seam_pauses(wav_list: list[pathlib.Path], temp_dir: pathlib.Path,
+                        chapter: int) -> list[pathlib.Path]:
+    """#120: chunk joins become deliberate reader pauses. Each chunk after
+    the first is prefixed with (seam_pause_ms + overlap_ms) of silence via
+    ffmpeg adelay, so the crossfade consumes its overlap INSIDE the pause
+    and the net inter-speech gap equals the declared seam_pause_ms.
+
+    Never feed short gap wavs into the pairwise acrossfade chain instead:
+    the recipe image's ffmpeg 7.1.5 TRUNCATES the accumulated stream when
+    the next input is sub-second (measured 2026-11-22: interleaved 0.3s
+    gap files collapsed a ~190s chapter chain to ~11s with every ffmpeg
+    call exiting 0). Padded wavs are full-length, the shape the chain has
+    always handled correctly. Pure file-planning; padded wavs land in the
+    chapter temp dir (removed with it at the end of the run)."""
+    pause_ms = declared_seam_pause_ms()
+    overlap_ms = declared_overlap_ms()
+    if len(wav_list) <= 1 or pause_ms <= 0:
         return wav_list
-    seq: list[pathlib.Path] = []
-    for i, wav in enumerate(wav_list):
-        seq.append(wav)
-        if i + 1 < len(wav_list):
-            gap = temp_dir / f"seam-{int(chapter):03d}-{i:03d}.wav"
-            make_silence_wav(gap, gap_ms / 1000.0, TTS_SAMPLE_RATE)
-            seq.append(gap)
-    return seq
+    out = [wav_list[0]]
+    delay = pause_ms + max(0, overlap_ms)
+    for i, wav in enumerate(wav_list[1:]):
+        padded = temp_dir / f"seampad-{int(chapter):03d}-{i:03d}.wav"
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-i", str(wav), "-af", f"adelay={delay}:all=1",
+               "-ar", str(TTS_SAMPLE_RATE), "-ac", "1", str(padded)]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        out.append(padded)
+    return out
 
 
 def style_text(style: str) -> str:
@@ -685,7 +697,7 @@ def main() -> int:
         if not wav_list:
             continue
         ch_wav = ch["temp_dir"] / f"chapter-{ch['chapter']:03d}.wav"
-        joined_list = interleave_seam_pauses(wav_list, ch["temp_dir"], ch["chapter"])
+        joined_list = prepend_seam_pauses(wav_list, ch["temp_dir"], ch["chapter"])
         crossfade_join(joined_list, ch_wav, declared_overlap_ms())
         try:
             in_durs = [round(get_audio_duration(p), 2) for p in joined_list]

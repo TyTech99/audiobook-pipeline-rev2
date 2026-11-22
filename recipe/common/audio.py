@@ -33,7 +33,14 @@ def make_silence_wav(path: pathlib.Path, seconds: float, sample_rate: int) -> No
 
 
 def crossfade_join(wav_paths: list[pathlib.Path], output_path: pathlib.Path, overlap_ms: int) -> None:
-    """Join chunk WAVs with an acrossfade per the docs' tts.overlap_ms."""
+    """Join chunk WAVs with an acrossfade per the docs' tts.overlap_ms.
+
+    HAZARD (measured 2026-11-22, issue #120 arc): the recipe image's
+    ffmpeg 7.1.5 truncates the accumulated stream when a NEXT input is
+    sub-second — a 0.3s gap file collapsed a ~190s chain to ~11s with
+    every call exiting 0. Never feed short clips into this chain; pad
+    pauses INTO the chunk wavs instead (see prepend_seam_pauses in the
+    ggardner recipe)."""
     if not wav_paths:
         raise ValueError("no wavs to join")
     output_path.parent.mkdir(parents=True, exist_ok=True)

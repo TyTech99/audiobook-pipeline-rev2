@@ -117,21 +117,26 @@ def test_infer_guarded_passes_clean_engine():
     assert eng.seen == {"a": 1}
 
 
-def test_interleave_seam_pauses(monkeypatch, tmp_path):
+def test_prepend_seam_pauses(monkeypatch, tmp_path):
     chdir = tmp_path / "ch001"
     chdir.mkdir()
-    monkeypatch.setattr(run, "make_silence_wav", lambda p, s, r: p.write_bytes(b"sil"))
+
+    def fake_run(cmd, check, capture_output, text):
+        assert "adelay=500:all=1" in cmd          # seam_pause 300 + overlap 200
+        pathlib.Path(cmd[-1]).write_bytes(b"pad")
+
+    monkeypatch.setattr(run.subprocess, "run", fake_run)
     wavs = [tmp_path / "a.wav", tmp_path / "b.wav", tmp_path / "c.wav"]
-    seq = run.interleave_seam_pauses(wavs, chdir, 1)
-    assert len(seq) == 5
-    assert seq[0] == wavs[0] and seq[2] == wavs[1] and seq[4] == wavs[2]
-    assert seq[1].exists() and seq[3].exists()
+    seq = run.prepend_seam_pauses(wavs, chdir, 1)
+    assert seq[0] == wavs[0]                     # the first chunk is untouched
+    assert len(seq) == 3
+    assert seq[1].exists() and seq[2].exists()    # later chunks are padded copies
 
 
-def test_interleave_seam_pauses_disabled(monkeypatch, tmp_path):
+def test_prepend_seam_pauses_disabled(monkeypatch, tmp_path):
     monkeypatch.setattr(run, "declared_seam_pause_ms", lambda: 0)
     wavs = [tmp_path / "a.wav", tmp_path / "b.wav"]
-    assert run.interleave_seam_pauses(wavs, tmp_path, 1) == wavs
+    assert run.prepend_seam_pauses(wavs, tmp_path, 1) == wavs
 
 
 def test_next_reference_carries_the_last_good_take():
