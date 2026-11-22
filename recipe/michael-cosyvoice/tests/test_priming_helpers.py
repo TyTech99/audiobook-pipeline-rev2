@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
 
 from run import (  # noqa: E402
     priming_enabled,
+    prime_selection,
     priming_tail_ms,
     prime_tail_slice,
     silence_gaps,
@@ -90,3 +91,25 @@ def test_priming_declaration_read_from_recipe_yaml():
     # recipe.yaml declares priming: true / priming_tail_ms: 6000 (#115)
     assert priming_tail_ms() == 6000
     assert priming_enabled() is True
+
+
+def test_prime_selection_whole_chunk_fallback():
+    sr = 1000
+    # 9.2s, two clean pauses but FOUR fragments: count mismatch -> tier 2,
+    # and 9.2s is within the 15s whole-chunk cap -> whole previous chunk
+    samples = _speech(3.0, sr) + _silence(0.1, sr) + _speech(3.0, sr) + _silence(0.1, sr) + _speech(3.0, sr)
+    assert prime_selection(samples, sr, ["One.", "Two.", "Three.", "Four."], 6000) == ("whole", 0, 4)
+
+
+def test_prime_selection_canonical_when_over_cap():
+    sr = 1000
+    # count mismatch AND 16s > 15s cap -> None (canonical re-anchor)
+    samples = _speech(7.0, sr) + _silence(0.1, sr) + _speech(7.0, sr) + _silence(0.1, sr) + _speech(1.8, sr)
+    assert prime_selection(samples, sr, ["One.", "Two.", "Three.", "Four."], 6000, whole_max_ms=15000) is None
+
+
+def test_prime_selection_prefers_sentence_cut():
+    sr = 1000
+    # clean 1:1 mapping exists -> tier 1 wins over the whole-chunk tier
+    samples = _speech(3.0, sr) + _silence(0.1, sr) + _speech(3.0, sr) + _silence(0.1, sr) + _speech(3.0, sr)
+    assert prime_selection(samples, sr, ["One.", "Two.", "Three."], 6000) == ("tail", 3100, 2)

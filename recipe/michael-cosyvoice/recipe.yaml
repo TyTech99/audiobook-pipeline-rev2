@@ -64,6 +64,7 @@ tts:
   speed: 0.9               # rendered-duration scale; the reference's brisk pace transfers in zero-shot and the ear ruled "very fast"
   priming: true            # Rolling-reference tone handoff (#115): each chunk after a chapter's first primes from the previous chunk's tail; RECIPE_PRIMING=0 kills it
   priming_tail_ms: 6000    # priming clip length — stays inside the engine's trained 3-10s reference range (engine/capabilities.yaml)
+  priming_whole_max_ms: 15000  # tier-2 cap: prime with the WHOLE previous chunk when no clean sentence cut exists (measured: comma pauses make exact cuts rare)
   overlap_ms: 200          # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms); the tone handoff itself is priming's job (#115)
   bitrate: "192k"
   format: "mp3"

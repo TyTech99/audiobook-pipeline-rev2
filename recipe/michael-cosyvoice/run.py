@@ -1030,6 +1030,48 @@ def prime_tail_slice(
     return best
 
 
+# Whole-previous-chunk priming cap (#115 tier 2). Measured on real
+# CosyVoice output (job a66ed73d checkpoint): the engine pauses at
+# commas as well as sentence ends — 21-24 interior pauses against ~7
+# sentence boundaries in a 39.6s chapter — so an exact pause-count to
+# sentence-boundary mapping rarely exists. The tier order is: sentence
+# cut inside the trained 3-10s range > whole previous chunk within this
+# cap > canonical re-anchor. Whole-chunk priming is out of upstream's
+# recommended reference range by design; the ear rules on it.
+PRIMING_WHOLE_CHUNK_MAX_MS = 15000
+
+
+def prime_whole_max_ms() -> int:
+    """Declared whole-chunk priming cap (tts.priming_whole_max_ms)."""
+    try:
+        value = int((MANIFEST.get("tts") or {}).get("priming_whole_max_ms", PRIMING_WHOLE_CHUNK_MAX_MS))
+    except (TypeError, ValueError):
+        value = PRIMING_WHOLE_CHUNK_MAX_MS
+    return max(0, value)
+
+
+def prime_selection(
+    samples: list[float],
+    sample_rate: int,
+    sentences: list[str],
+    tail_ms: int,
+    whole_max_ms: int = PRIMING_WHOLE_CHUNK_MAX_MS,
+) -> tuple[str, int, int] | None:
+    """Tiered priming-pair choice (#115) — pure and deterministic.
+
+    Returns ("tail", start, trailing) for a sentence cut inside the
+    trained range, ("whole", 0, len) for the full previous chunk within
+    the extended cap, or None for a canonical re-anchor.
+    """
+    selection = prime_tail_slice(samples, sample_rate, sentences, tail_ms)
+    if selection is not None:
+        return ("tail", selection[0], selection[1])
+    duration_ms = 1000.0 * len(samples) / sample_rate
+    if sentences and duration_ms <= whole_max_ms:
+        return ("whole", 0, len(sentences))
+    return None
+
+
 def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int, prime_wav: pathlib.Path | None = None, prime_text: str | None = None) -> None:
     """Synthesize a single text chunk to a WAV file.
 
@@ -1117,12 +1159,12 @@ def _run_chain(
             counts["canonical"] += 1
         elif prime_enabled and synthesis_mode() == "zero_shot":
             samples, sample_rate, prev_fragments = prev
-            selection = prime_tail_slice(samples, sample_rate, prev_fragments, tail_ms)
+            selection = prime_selection(samples, sample_rate, prev_fragments, tail_ms, prime_whole_max_ms())
             if selection is None:
                 counts["re_anchor"] += 1
                 log.info("Chain: canonical re-anchor for %s (no clean tail cut)", pathlib.Path(out_path).name)
             else:
-                start, trailing = selection
+                kind, start, trailing = selection
                 tail_text = " ".join(prev_fragments[len(prev_fragments) - trailing :])
                 tail_wav = pathlib.Path(str(out_path) + ".prime.wav")
                 torchaudio.save(
@@ -1131,7 +1173,7 @@ def _run_chain(
                     sample_rate,
                 )
                 prime_wav, prime_text = tail_wav, f"{SYSTEM_PROMPT}{ENDOFPROMPT}{tail_text}"
-                counts["tail_prime" if start else "full_chunk_prime"] += 1
+                counts["tail_prime" if kind == "tail" and start else "full_chunk_prime"] += 1
         try:
             generate_chunk(model, text, pathlib.Path(out_path), instruct, seed, prime_wav, prime_text)
             results[idx] = None
