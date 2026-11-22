@@ -137,7 +137,7 @@ def test_synthesis_mode_and_zero_shot_prompt():
     assert synthesis_mode() == "zero_shot"
     prompt = zero_shot_prompt_text()
     assert prompt.startswith("You are a helpful assistant.<|endofprompt|>")
-    assert "brighter place" in prompt  # the committed reference transcript
+    assert "history of Florence" in prompt  # the committed reference transcript (voices/ggardner.wav)
     monkeypatch_manifest = {"tts": {"synthesis_mode": "instruct2"}}
     saved = run_module.MANIFEST
     try:

@@ -59,8 +59,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 log = logging.getLogger("recipe")
 
 RECIPE_DIR = pathlib.Path(__file__).resolve().parent
-VOICE_PATH = RECIPE_DIR / "voices" / "Michael.wav"
-VOICE_TRANSCRIPT_PATH = RECIPE_DIR / "voices" / "Michael.wav.transcript.txt"
 STYLES_DIR = RECIPE_DIR / "styles"
 INPUT_DIR = pathlib.Path(os.environ.get("INPUT_DIR", "/input"))
 OUTPUT_DIR = pathlib.Path(os.environ.get("OUTPUT_DIR", "/output"))
@@ -80,6 +78,14 @@ ENGINE_MANIFEST = MANIFEST.get("engine") or {}
 CAPABILITIES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("capabilities", "engine/capabilities.yaml")
 ANNOTATION_PROMPT_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("annotation_prompt", "engine/annotation-prompt.j2")
 MARKUP_EXAMPLES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("markup_examples", "engine/markup-examples.md")
+
+# Voice reference — DECLARED (recipe.yaml tts.voice): a voice swap is a
+# declaration edit, never a code edit. The transcript file carries the
+# clip's verbatim words — upstream zero-shot requires the prompt text
+# to match the reference audio exactly; a mismatch garbles the take.
+_declared_voice = str((MANIFEST.get("tts") or {}).get("voice") or "voices/Michael.wav")
+VOICE_PATH = RECIPE_DIR / _declared_voice
+VOICE_TRANSCRIPT_PATH = pathlib.Path(str(VOICE_PATH) + ".transcript.txt")
 
 # Mastering target: the documented ACX loudness range is -23..-18 LUFS
 # (voice-recipe.md); -18 is the ceiling-normal choice.
@@ -1688,7 +1694,7 @@ def main() -> int:
             "model_repo": COSYVOICE_REPO,
             "model_revision": COSYVOICE_REVISION,
             "mode": synthesis_mode(),
-            "voice": "voices/Michael.wav",
+            "voice": _declared_voice,
             "seed": seed,
             "fp16": flags["fp16"],
             "trt_flow": flags["load_trt"],

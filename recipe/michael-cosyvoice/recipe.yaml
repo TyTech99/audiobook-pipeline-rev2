@@ -3,14 +3,18 @@ version: "1.0.0"
 stack: "cosyvoice3"
 
 description: >
-  Michael voice clone using CosyVoice 3 (FunAudioLLM
+  CosyVoice 3 voice recipe (FunAudioLLM
   Fun-CosyVoice3-0.5B-2512, Apache-2.0). Voice sample:
-  voices/Michael.wav, zero-shot with the verbatim reference transcript;
-  chapters synthesize as serial chunk chains with rolling-reference
-  tone priming (#115) — each chunk after a chapter's first primes from
-  the previous chunk's tail, and each chapter resets to the canonical
-  reference. LLM annotation is optional (enabled when LLM_BASE_URL and
-  LLM_MODEL are set). Replaces the retired Chatterbox recipe (#88).
+  voices/ggardner.wav — Grover Gardner's reading of the introduction
+  to The Prince (public-domain text, expressive human reference;
+  verbatim transcript on file; the flat demo clip voices/Michael.wav
+  stays bundled for A/B). Zero-shot transfers the reference's
+  delivery; chapters synthesize as serial chunk chains with
+  rolling-reference tone priming (#115) — each chunk after a
+  chapter's first primes from the previous chunk's tail, and each
+  chapter resets to the canonical reference. LLM annotation is
+  optional (enabled when LLM_BASE_URL and LLM_MODEL are set).
+  Replaces the retired Chatterbox recipe (#88).
 
 min_hardware:
   gpu: true
@@ -69,7 +73,7 @@ tts:
   bitrate: "192k"
   format: "mp3"
   chunk_size: 300         # Characters per TTS call
-  voice: "voices/Michael.wav"
+  voice: "voices/ggardner.wav"  # expressive human reference — Grover Gardner reading the public-domain introduction to The Prince; the flat demo clip voices/Michael.wav stays bundled for A/B
   seed: 1234              # Fixed seed, re-applied per call (deterministic takes)
   engine_flags:           # Performance flags (#93); RECIPE_* envs are kill switches
     fp16: true            # autocast LLM + flow (bandwidth-bound LLM: halves traffic)
