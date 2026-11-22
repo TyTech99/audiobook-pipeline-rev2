@@ -122,8 +122,17 @@ def chunk_text(text: str, max_chars: int = MAX_CHARS_PER_TTS) -> list[str]:
 
 
 def normalize_for_comparison(text: str) -> str:
-    """Normalize text for source-fidelity comparison (lowercase, collapse spaces)."""
-    return re.sub(r"\s+", " ", text.lower()).strip()
+    """Normalize text for source-fidelity comparison.
+
+    Word cores only: lowercase, strip punctuation, keep intra-word
+    apostrophes. Hint-added commas and re-quoted dialogue must not break
+    the word check — the live #110 run failed every annotated segment
+    because pause-commas glued to source words ("calamity," vs "calamity")
+    made exact token matching fail, even though every source word was
+    preserved in order.
+    """
+    words = re.findall(r"[a-z0-9]+(?:'[a-z0-9]+)*", text.lower())
+    return " ".join(words)
 
 
 def validate_annotation(source_text: str, annotated_text: str) -> bool:
@@ -134,6 +143,17 @@ def validate_annotation(source_text: str, annotated_text: str) -> bool:
         return True
     it = iter(ann_words)
     return all(word in it for word in src_words)
+
+
+def first_annotation_mismatch(source_text: str, annotated_text: str) -> str | None:
+    """First source word the annotation does not preserve (for logging)."""
+    src_words = normalize_for_comparison(source_text).split()
+    ann_words = normalize_for_comparison(annotated_text).split()
+    it = iter(ann_words)
+    for word in src_words:
+        if word not in it:
+            return word
+    return None
 
 
 def strip_performance_hints(text: str) -> str:
@@ -460,7 +480,11 @@ Text:
             if validate_annotation(text, content):
                 log.info("LLM annotated segment (%d chars)", len(content))
                 return content
-            log.warning("LLM annotation failed validation, using original text")
+            bad = first_annotation_mismatch(text, content)
+            log.warning(
+                "LLM annotation failed validation (first mismatch: %r), using original text",
+                bad,
+            )
     except Exception as exc:
         log.warning("LLM annotation failed (%s), using original text", exc)
     return text

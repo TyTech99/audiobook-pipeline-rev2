@@ -10,6 +10,7 @@ from run import (
     chunk_text,
     normalize_for_comparison,
     validate_annotation,
+    first_annotation_mismatch,
     strip_performance_hints,
     style_instruct,
     engine_flags,
@@ -49,7 +50,10 @@ def test_chunk_text_splits_long_sentence():
 
 def test_normalize_for_comparison():
     assert normalize_for_comparison("Hello   World") == "hello world"
-    assert normalize_for_comparison("  A.B  ") == "a.b"
+    # Word cores only: punctuation strips, intra-word apostrophes stay.
+    assert normalize_for_comparison("  A.B  ") == "a b"
+    assert normalize_for_comparison("calamity,") == "calamity"
+    assert normalize_for_comparison("don't") == "don't"
 
 
 def test_validate_annotation_preserves_words():
@@ -57,8 +61,23 @@ def test_validate_annotation_preserves_words():
     assert validate_annotation("Hello world", "Hello [emphasis] world") is True
 
 
+def test_validate_annotation_allows_hint_punctuation():
+    # Live #110 case: the model glues pause-commas to source words —
+    # every word preserved in order must still validate.
+    src = "We foresaw the calamity for we recalled the causes from which it sprang"
+    ann = "We foresaw the calamity, for we recalled the causes from which it sprang [pause]"
+    assert validate_annotation(src, ann) is True
+    assert first_annotation_mismatch(src, ann) is None
+
+
 def test_validate_annotation_rejects_missing_words():
     assert validate_annotation("Hello world", "Hello there") is False
+    assert first_annotation_mismatch("Hello world", "Hello there") == "world"
+
+
+def test_validate_annotation_rejects_changed_words():
+    assert validate_annotation("the calamity came", "the calimity came") is False
+    assert first_annotation_mismatch("the calamity came", "the calimity came") == "calamity"
 
 
 def test_validate_annotation_empty_source():
