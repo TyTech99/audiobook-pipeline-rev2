@@ -475,11 +475,45 @@ def acx_verdict(full_wav: pathlib.Path) -> dict[str, Any]:
         },
         "checks": {
             "loudness_-23_-18": ok_loudness,
-            "true_peak_le_-3": ok_peak,
-            "noise_floor_le_-60": ok_floor,
+            "true_peak_<=_-3": ok_peak,
+            "noise_floor_<=_-60": ok_floor,
         },
         "acx_compliant": bool(ok_loudness and ok_peak and ok_floor),
     }
+
+
+# Instruct phrases that never legitimately appear in narration (#114):
+# hearing one means the engine continued the prompt text into speech.
+_PROMPT_LEAK_PHRASES = ("helpful assistant", "endofprompt", "radio narrator", "well-written article")
+
+
+def prompt_leak_check(retail_mp3: pathlib.Path) -> dict[str, Any]:
+    """Whisper-transcribe the retail sample and flag instruct leakage.
+
+    Fail-loud gate: the transcript excerpt and found phrases land in the
+    QC report, and a leak fails the job (the delivered audio would read
+    the instruct aloud — worse than no audio). Whisper errors degrade to
+    a reported skip, never a crash.
+    """
+    try:
+        import warnings
+
+        import whisper
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            model = whisper.load_model("tiny")
+            result = model.transcribe(str(retail_mp3), temperature=0)
+        text = " ".join((result.get("text") or "").split())
+        lowered = text.lower()
+        found = [p for p in _PROMPT_LEAK_PHRASES if p in lowered]
+        return {
+            "leaked": bool(found),
+            "phrases_found": found,
+            "transcript_excerpt": text[:300],
+        }
+    except Exception as exc:
+        return {"leaked": None, "error": str(exc)}
 
 
 def wav_to_mp3(input_path: pathlib.Path, output_path: pathlib.Path) -> None:
@@ -878,8 +912,14 @@ def main() -> int:
     # directions layer on top of it.
     llm_settings = load_llm_settings()
     contract = AnnotationContract.from_capabilities(CAPABILITIES_PATH)
-    style_desc = style_description(style)
-    base_instruct = style_base(style)
+    # The ANNOTATOR gets the full style prompt (styles/*.j2) — the docs
+    # place the performance style in the LLM annotation prompt.
+    style_rich = style_base(style)
+    # The ENGINE gets a compact instruct (#114): instruct2's trained
+    # distribution is SHORT directions — the 5-line style paragraph
+    # was narrated verbatim. The declared style DESCRIPTION is the
+    # compact phrase; fall back to the j2's first sentence.
+    base_instruct = style_description(style) or style_rich.split(".")[0].strip()
     if contract.configured:
         default_instruct = compose_instruct(contract, base_instruct, None)
     else:
@@ -925,14 +965,14 @@ def main() -> int:
         if chapters_to_annotate:
             if slots == 1 or len(chapters_to_annotate) == 1:
                 for ch in chapters_to_annotate:
-                    cues_map, stats = annotate_chapter(ch, contract, llm_settings, style, style_desc)
+                    cues_map, stats = annotate_chapter(ch, contract, llm_settings, style, style_rich)
                     annotation_cues.update(cues_map)
                     _merge_annotation_stats(annotation_stats, stats)
             else:
                 from concurrent.futures import ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=min(slots, len(chapters_to_annotate))) as pool:
                     results = pool.map(
-                        lambda ch: annotate_chapter(ch, contract, llm_settings, style, style_desc),
+                        lambda ch: annotate_chapter(ch, contract, llm_settings, style, style_rich),
                         chapters_to_annotate,
                     )
                     for cues_map, stats in results:
@@ -1137,6 +1177,12 @@ def main() -> int:
     trim_to_duration(full_wav, layout["retail_sample"].with_suffix(".wav"), RETAIL_SAMPLE_SECONDS)
     wav_to_mp3(layout["retail_sample"].with_suffix(".wav"), layout["retail_sample"])
 
+    # Prompt-leak gate (#114): transcribe the retail sample and flag any
+    # instruct phrase — the ear report caught the narrator reading the
+    # style template and directions aloud; this makes it machine-catchable.
+    leak = prompt_leak_check(layout["retail_sample"])
+    log.info("Prompt-leak check: leaked=%s phrases=%s", leak.get("leaked"), leak.get("phrases_found"))
+
     # Metadata
     output_metadata = {
         "title": title,
@@ -1177,6 +1223,7 @@ def main() -> int:
         "acx_measurements": acx["measured"],
         "acx_checks": acx["checks"],
         "segment_failures": segment_failures,
+        "prompt_leak_check": leak,
         "total_chapters": len(chapter_info),
         "total_segments": total_segments,
         "failed_segments": failed_segments,
@@ -1222,6 +1269,16 @@ def main() -> int:
 
     # Cleanup
     shutil.rmtree(temp_dir, ignore_errors=True)
+
+    # Fail loud on prompt leakage (#114): the report and transcript are
+    # already on disk; shipping audio that reads the instruct aloud is a
+    # failed take, not a warning.
+    if leak.get("leaked"):
+        log.error(
+            "PROMPT LEAK: the retail sample narrates instruct phrases %s — failing. Transcript: %s",
+            leak.get("phrases_found"), leak.get("transcript_excerpt"),
+        )
+        return 1
 
     log.info("Recipe complete in %.1fs: %s", time.time() - start_time, layout["m4b"])
     return 0

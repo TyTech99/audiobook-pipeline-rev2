@@ -64,6 +64,7 @@ class AnnotationContract:
     inline_tags: tuple[InlineTag, ...] = ()
     instruct_format: str = ""          # e.g. "You are a helpful assistant. {direction}<|endofprompt|>"
     instruct_controls: tuple[str, ...] = ()
+    max_direction_words: int = 12     # in-distribution instruct2 directions are SHORT (#114)
     punctuation_rules: tuple[str, ...] = ()
     retries: int = 2
 
@@ -92,11 +93,16 @@ class AnnotationContract:
             if str(t.get("tag", "")).strip()
         )
         instruct = block.get("instruct_channel") or {}
+        try:
+            max_words = max(1, int(instruct.get("max_direction_words", 12)))
+        except (TypeError, ValueError):
+            max_words = 12
         return cls(
             engine=str(data.get("engine", "")).strip(),
             inline_tags=tags,
             instruct_format=str(instruct.get("format", "")).strip(),
             instruct_controls=tuple(str(c) for c in instruct.get("controls", [])),
+            max_direction_words=max_words,
             punctuation_rules=tuple(str(r) for r in block.get("punctuation_rules", [])),
             retries=max(0, int(block.get("retries", 2))),
         )
@@ -285,16 +291,39 @@ def compose_tts_text(clean_text: str, cues: dict[str, Any] | None) -> str:
     return " ".join(out)
 
 
+def sanitize_direction(direction: str, max_words: int) -> str:
+    """Instruct2 directions must be SHORT, clean prose (#114).
+
+    Bracketed/angled junk is stripped (it would either be narrated or
+    corrupt the instruct), and the phrase is clamped to max_words —
+    out-of-distribution long instructs make CosyVoice continue the
+    prompt text into speech.
+    """
+    clean = re.sub(r"\[[^\]]*\]|\{[^}]*\}|<[^>]*>", " ", direction or "")
+    clean = re.sub(r"\s+", " ", clean).strip(" ,;")
+    words = clean.split()
+    if max_words and len(words) > max_words:
+        words = words[:max_words]
+        clean = " ".join(words).rstrip(",;")
+    return clean
+
+
 def compose_instruct(
     contract: AnnotationContract,
     style_base: str,
     direction: str | None,
 ) -> str:
     """Per-segment instruct from the style base plus the cue direction,
-    wrapped per the engine's declared instruct format."""
+    wrapped per the engine's declared instruct format.
+
+    The composed direction sentence is kept SHORT and period-joined —
+    the trained instruct2 distribution is a brief spoken-style
+    direction, not a paragraph (#114).
+    """
+    clean = sanitize_direction(direction or "", contract.max_direction_words)
     combined = style_base
-    if direction:
-        combined = f"{style_base.rstrip('.')} , {direction}"
+    if clean:
+        combined = f"{style_base.rstrip('. ')} . {clean}"
     if contract.instruct_format and "{direction}" in contract.instruct_format:
         return contract.instruct_format.replace("{direction}", combined)
     return combined

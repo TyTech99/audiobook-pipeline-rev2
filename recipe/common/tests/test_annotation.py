@@ -24,6 +24,7 @@ from common.annotation import (
     normalize_words,
     parse_annotation,
     render_simple_template,
+    sanitize_direction,
     words_in_order,
 )
 
@@ -162,11 +163,26 @@ class TestCompose:
         assert compose_tts_text(clean, None) == clean
         assert compose_tts_text(clean, {"tags": [], "direction": None}) == clean
 
-    def test_compose_instruct_uses_declared_format(self, contract: AnnotationContract):
+    def test_compose_instruct_uses_declared_engine_format(self, contract: AnnotationContract):
         out = compose_instruct(contract, "Even delivery, neutral tone.", "grave and low")
         assert out.startswith("You are a helpful assistant. ")
         assert out.endswith("<|endofprompt|>")
         assert "grave and low" in out
+
+
+    def test_compose_instruct_keeps_directions_short(self, contract: AnnotationContract):
+        # #114: out-of-distribution long instructs leak into narration — the
+        # module clamps to the declared max_direction_words (12 here).
+        long_direction = " ".join(f"word{i}" for i in range(40))
+        out = compose_instruct(contract, "Even delivery.", long_direction)
+        inner = out.split("You are a helpful assistant. ", 1)[1].rsplit("<|endofprompt|>", 1)[0]
+        assert len(inner.split()) <= 3 + contract.max_direction_words
+
+
+    def test_sanitize_direction_strips_bracket_junk(self):
+        assert sanitize_direction("[think] grave, low", 12) == "grave, low"
+        assert sanitize_direction("<think> pause", 12) == "pause"
+        assert sanitize_direction("a " * 30, 5) == "a a a a a"
 
     def test_compose_instruct_without_direction_keeps_style(self, contract: AnnotationContract):
         out = compose_instruct(contract, "Even delivery, neutral tone.", None)

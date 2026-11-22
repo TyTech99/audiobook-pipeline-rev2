@@ -61,6 +61,9 @@ annotation_contract:
   instruct_channel:
     format: "You are a helpful assistant. {direction}<|endofprompt|>"
     controls: ["emotions", "speed", "volume", "tone"]
+    # Instruct2's trained distribution is SHORT directions; long
+    # comma-spliced instructs leak into narration (#114).
+    max_direction_words: 12
   punctuation_rules:
     - "Add commas at natural breathing points"
     - "Use ellipses (...) where a sentence trails off or hesitates"
