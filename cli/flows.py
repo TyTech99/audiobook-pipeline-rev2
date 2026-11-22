@@ -617,19 +617,29 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+#: Weight files travel as pinned HF downloads, never through the prefix copy.
+#: Everything else ships with the tree — including binary voice assets
+#: (base.wav / voices/*.wav) the recipe image bakes in (#91).
+_WEIGHT_FILE_SUFFIXES = {".pt", ".pth", ".safetensors", ".bin", ".gguf", ".onnx"}
+
+
 def _copy_tree(host, source: Path, dest_root: str) -> None:
     for path in source.rglob("*"):
         if not path.is_file():
             continue
         if "__pycache__" in path.parts or "tests" in path.parts or path.suffix == ".pyc":
             continue
-        if path.suffix in {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".bin", ".pt", ".pth", ".safetensors"}:
+        if path.suffix in _WEIGHT_FILE_SUFFIXES:
             continue
+        rel = dest_root + "/" + path.relative_to(source).as_posix()
         try:
             text = path.read_text()
         except (UnicodeDecodeError, ValueError):
+            # Binary asset: copy as bytes, never drop it (#91) — the decode
+            # failure is the signal to use the bytes path, not a skip reason.
+            host.write_bytes(rel, path.read_bytes())
             continue
-        host.write(dest_root + "/" + path.relative_to(source).as_posix(), text)
+        host.write(rel, text)
 
 
 def _install_coordinator_files(host, prefix: str, state: dict) -> None:

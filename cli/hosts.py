@@ -16,7 +16,7 @@ class MemoryHost:
     docker_ready: bool = True
     reboot_pending: bool = False
     ips: list[str] = field(default_factory=lambda: ["127.0.0.1"])
-    files: dict[str, str] = field(default_factory=dict)
+    files: dict[str, str | bytes] = field(default_factory=dict)
     packages: list[str] = field(default_factory=list)
     units: dict[str, str] = field(default_factory=dict)
     tasks: dict[str, str] = field(default_factory=dict)
@@ -37,6 +37,9 @@ class MemoryHost:
 
     def write(self, path: str, content: str) -> None:
         self.files[path] = content
+
+    def write_bytes(self, path: str, data: bytes) -> None:
+        self.files[path] = data
 
     def chmod(self, path: str, mode: int) -> None:
         pass  # no-op in memory host

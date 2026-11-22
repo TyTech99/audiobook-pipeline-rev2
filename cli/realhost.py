@@ -88,6 +88,11 @@ class RealHost:
         if file.name.endswith(".env"):
             os.chmod(file, 0o600)
 
+    def write_bytes(self, path: str, data: bytes) -> None:
+        file = Path(path)
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(data)
+
     def chmod(self, path: str, mode: int) -> None:
         os.chmod(path, mode)
 
