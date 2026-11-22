@@ -76,6 +76,10 @@ CAPABILITIES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("capabilities", "engine/cap
 ANNOTATION_PROMPT_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("annotation_prompt", "engine/annotation-prompt.j2")
 MARKUP_EXAMPLES_PATH = RECIPE_DIR / ENGINE_MANIFEST.get("markup_examples", "engine/markup-examples.md")
 
+# Mastering target: the documented ACX loudness range is -23..-18 LUFS
+# (voice-recipe.md); -18 is the ceiling-normal choice.
+MASTER_TARGET_LUFS = -18.0
+
 # CosyVoice 3 outputs 24 kHz mono; we master to 44.1 kHz for packaging.
 TTS_SAMPLE_RATE = 24000
 PACK_SAMPLE_RATE = 44100
@@ -234,16 +238,16 @@ def engine_flags() -> dict[str, bool]:
 def parallel_workers() -> int:
     """Chunk-synthesis worker processes (#93).
 
-    Default 3 (operator-set 2026-11-22, up from 2 after the 5-min sample
-    verified 2 workers stable at ~9GB on the 16 GB GPU 1; 3 fits ~13.5GB).
-    Per-chunk determinism (fixed seed re-applied per call) makes chunk
-    order irrelevant to output. RECIPE_PARALLEL=1 is the serial kill
-    switch; unparsable values fall back to the default.
+    Default 2: the twice-proven configuration on the 16 GB GPU 1 (0
+    failed segments across both measured runs; the one 3-worker run that
+    lost 2 segments to silence is undiagnosed — #111's per-segment
+    failure capture now makes any recurrence self-documenting). Ty's
+    call stands on the measured data; RECIPE_PARALLEL overrides.
     """
     try:
-        return max(1, int(os.environ.get("RECIPE_PARALLEL", "3")))
+        return max(1, int(os.environ.get("RECIPE_PARALLEL", "2")))
     except ValueError:
-        return 3
+        return 2
 
 
 def chapter_filename(chapter_number: int) -> str:
@@ -391,15 +395,91 @@ def get_audio_duration(path: pathlib.Path) -> float:
 
 
 def master_wav(input_path: pathlib.Path, output_path: pathlib.Path) -> None:
-    """Apply mastering chain: loudnorm + resample to 44.1k mono."""
+    """Apply mastering chain: loudnorm + resample to 44.1k mono.
+
+    Target I=-18 LUFS: the documented ACX range is -23 to -18
+    (docs/data-models/voice-recipe.md mastering field table); -16 sat
+    above (louder than) the permitted ceiling. True peak -3 dB per ACX.
+    """
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(input_path),
-        "-af", f"loudnorm=I=-16:TP=-3:LRA=11,aresample={PACK_SAMPLE_RATE}",
+        "-af", f"loudnorm=I={MASTER_TARGET_LUFS}:TP=-3:LRA=11,aresample={PACK_SAMPLE_RATE}",
         "-ac", "1",
         str(output_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True, text=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(
+            f"mastering ffmpeg failed ({exc.returncode}): {(exc.stderr or '').strip()[:600]}"
+        ) from exc
+
+
+def measure_loudness(wav_path: pathlib.Path) -> dict[str, float | None]:
+    """Measure integrated LUFS and true peak (ffmpeg loudnorm analysis)."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(wav_path),
+        "-af", "loudnorm=print_format=summary", "-f", "null", "-",
+    ]
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stderr
+    lufs = peak = None
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("Input Integrated:"):
+            lufs = float(line.split(":")[1].split()[0])
+        elif line.startswith("Input True Peak:"):
+            peak = float(line.split(":")[1].split()[0])
+    return {"integrated_lufs": lufs, "true_peak_db": peak}
+
+
+def measure_noise_floor(wav_path: pathlib.Path) -> float | None:
+    """Minimum per-window RMS across the file — the noise floor (dB).
+
+    astats over 100ms windows; the quietest window's RMS is the floor a
+    listener hears in pauses. -60 dB is the ACX ceiling.
+    """
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats", "-i", str(wav_path),
+        "-af", "astats=metadata=1:reset=1:length=0.1,ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-",
+        "-f", "null", "-",
+    ]
+    out = subprocess.run(cmd, check=True, capture_output=True, text=True).stdout
+    values = []
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith("lavfi.astats.Overall.RMS_level="):
+            raw = line.split("=", 1)[1].strip()
+            try:
+                values.append(float(raw))
+            except ValueError:
+                continue
+    return min(values) if values else None
+
+
+def acx_verdict(full_wav: pathlib.Path) -> dict[str, Any]:
+    """Measure the final audiobook against the documented ACX spec
+    (voice-recipe.md qc: -23..-18 LUFS, true peak <= -3 dB, noise floor
+    <= -60 dB). The verdict is MEASURED, never asserted."""
+    loud = measure_loudness(full_wav)
+    floor = measure_noise_floor(full_wav)
+    lufs, peak = loud.get("integrated_lufs"), loud.get("true_peak_db")
+    ok_loudness = lufs is not None and -23.0 <= lufs <= -18.0
+    ok_peak = peak is not None and peak <= -3.0
+    ok_floor = floor is not None and floor <= -60.0
+    return {
+        "measured": {
+            "integrated_lufs": lufs,
+            "true_peak_db": peak,
+            "noise_floor_db": floor,
+        },
+        "checks": {
+            "loudness_-23_-18": ok_loudness,
+            "true_peak_le_-3": ok_peak,
+            "noise_floor_le_-60": ok_floor,
+        },
+        "acx_compliant": bool(ok_loudness and ok_peak and ok_floor),
+    }
 
 
 def wav_to_mp3(input_path: pathlib.Path, output_path: pathlib.Path) -> None:
@@ -1076,8 +1156,27 @@ def main() -> int:
     layout["metadata"].write_text(json.dumps(output_metadata, indent=2))
 
     # QC report
+    # QC: MEASURE the final audiobook against the documented ACX spec
+    # (#113-class fix: the old report hardcoded acx_compliant=true).
+    acx = acx_verdict(full_wav)
+    log.info(
+        "ACX measured: LUFS=%s peak=%s dB floor=%s dB -> compliant=%s",
+        acx["measured"]["integrated_lufs"], acx["measured"]["true_peak_db"],
+        acx["measured"]["noise_floor_db"], acx["acx_compliant"],
+    )
+    # Per-segment synthesis failures with their reasons (#111): the count
+    # alone hid the cause; the recipe log dies with the container.
+    segment_failures = {
+        pathlib.Path(tasks[idx][2]).name: str(errors[idx])
+        for idx in range(total_segments)
+        if errors.get(idx) is not None
+    }
+
     qc_report = {
-        "acx_compliant": True,
+        "acx_compliant": acx["acx_compliant"],
+        "acx_measurements": acx["measured"],
+        "acx_checks": acx["checks"],
+        "segment_failures": segment_failures,
         "total_chapters": len(chapter_info),
         "total_segments": total_segments,
         "failed_segments": failed_segments,
@@ -1096,7 +1195,7 @@ def main() -> int:
             "m4b_stik": 2,
             "mp3_bitrate": MP3_BITRATE,
             "sample_rate": PACK_SAMPLE_RATE,
-            "loudness_target": "I=-16 LUFS",
+            "loudness_target": f"I={MASTER_TARGET_LUFS:g} LUFS (ACX -23..-18)",
         },
         "engine": {
             "name": "cosyvoice3",
