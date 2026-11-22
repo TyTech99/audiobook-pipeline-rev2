@@ -56,6 +56,7 @@ log = logging.getLogger("recipe")
 
 RECIPE_DIR = pathlib.Path(__file__).resolve().parent
 VOICE_PATH = RECIPE_DIR / "voices" / "Michael.wav"
+VOICE_TRANSCRIPT_PATH = RECIPE_DIR / "voices" / "Michael.wav.transcript.txt"
 STYLES_DIR = RECIPE_DIR / "styles"
 INPUT_DIR = pathlib.Path(os.environ.get("INPUT_DIR", "/input"))
 OUTPUT_DIR = pathlib.Path(os.environ.get("OUTPUT_DIR", "/output"))
@@ -751,22 +752,54 @@ def load_tts(model_dir: str, flags: dict[str, bool]):
     return model
 
 
+def synthesis_mode() -> str:
+    """Declared synthesis mode (recipe.yaml tts.synthesis_mode).
+
+    zero_shot (default): `inference_zero_shot` with prompt_text =
+    'You are a helpful assistant.<|endofprompt|>' + the reference's
+    VERBATIM transcript — upstream's canonical English usage; transfers
+    the reference's delivery, not just timbre. The transcript must match
+    the reference audio exactly (upstream webui.py:140; mismatch garbles
+    output per production deployments) — it ships as
+    voices/Michael.wav.transcript.txt and its absence fails loudly.
+
+    instruct2: the previous mode — timbre from the reference, delivery
+    from the instruct text; kept for A/B via the declaration.
+    """
+    declared = str((MANIFEST.get("tts") or {}).get("synthesis_mode", "zero_shot")).strip().lower()
+    return "instruct2" if declared == "instruct2" else "zero_shot"
+
+
+def zero_shot_prompt_text() -> str:
+    """'You are a helpful assistant.<|endofprompt|>' + the reference
+    transcript — the exact prompt_text shape of the model card's
+    zero-shot examples (no space before the token, transcript after)."""
+    transcript = VOICE_TRANSCRIPT_PATH.read_text().strip()
+    if not transcript:
+        raise RuntimeError(f"empty reference transcript: {VOICE_TRANSCRIPT_PATH}")
+    return f"{SYSTEM_PROMPT}{ENDOFPROMPT}{transcript}"
+
+
 def generate_chunk(model, text: str, output_wav: pathlib.Path, instruct: str, seed: int) -> None:
     """Synthesize a single text chunk to a WAV file.
 
-    inference_instruct2 clones the reference voice (voices/Michael.wav)
-    with no transcript needed, while the instruct text directs delivery.
-    The seed is re-applied before every call so the whole take samples
-    from one RNG state — a stable narrator and a reproducible take, and
-    the property that makes chunk-level parallelism safe (#93): any
-    worker process given the same seed produces the same chunk.
+    zero_shot mode clones the reference (voices/Michael.wav) WITH its
+    delivery, via the verbatim transcript; instruct2 clones timbre only
+    and directs delivery through the instruct text. The seed is
+    re-applied before every call so the whole take samples from one RNG
+    state — a stable narrator and a reproducible take, and the property
+    that makes chunk-level parallelism safe (#93): any worker process
+    given the same seed produces the same chunk.
     """
     import torch
     import torchaudio
 
     log.info("TTS: %d chars -> %s", len(text), output_wav.name)
     torch.manual_seed(seed)
-    chunks = list(model.inference_instruct2(text, instruct, str(VOICE_PATH), stream=False))
+    if synthesis_mode() == "zero_shot":
+        chunks = list(model.inference_zero_shot(text, zero_shot_prompt_text(), str(VOICE_PATH), stream=False))
+    else:
+        chunks = list(model.inference_instruct2(text, instruct, str(VOICE_PATH), stream=False))
     pieces = [c["tts_speech"] for c in chunks if c.get("tts_speech") is not None]
     if not pieces:
         raise RuntimeError("CosyVoice produced no audio")
@@ -874,6 +907,13 @@ def main() -> int:
         return 1
     if not VOICE_PATH.exists():
         log.error("Voice file %s does not exist", VOICE_PATH)
+        return 1
+
+    # Zero-shot cloning is verbatim-transcript-or-fail (upstream's own
+    # requirement; mismatch garbles output) — the transcript ships with
+    # the recipe and its absence is a packaging error, not a fallback.
+    if synthesis_mode() == "zero_shot" and not VOICE_TRANSCRIPT_PATH.exists():
+        log.error("Reference transcript %s does not exist", VOICE_TRANSCRIPT_PATH)
         return 1
 
     # GPU or fail (#103): synthesis never runs CPU-only. A missing CUDA
@@ -1257,7 +1297,7 @@ def main() -> int:
             "name": "cosyvoice3",
             "model_repo": COSYVOICE_REPO,
             "model_revision": COSYVOICE_REVISION,
-            "mode": "inference_instruct2",
+            "mode": synthesis_mode(),
             "voice": "voices/Michael.wav",
             "seed": seed,
             "fp16": flags["fp16"],

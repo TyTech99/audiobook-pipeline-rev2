@@ -15,6 +15,8 @@ from run import (
     validate_annotation,
     first_annotation_mismatch,
     style_base,
+    synthesis_mode,
+    zero_shot_prompt_text,
     CAPABILITIES_PATH,
     SYSTEM_PROMPT,
     ENDOFPROMPT,
@@ -126,6 +128,23 @@ def test_compose_instruct_uses_declared_engine_format():
     assert out.startswith("You are a helpful assistant. ")
     assert out.endswith(ENDOFPROMPT)
     assert "Even delivery" in out and "grave and low" in out
+
+
+def test_synthesis_mode_and_zero_shot_prompt():
+    # The declared mode is the model card's canonical zero-shot shape:
+    # no space before the endofprompt token, transcript after it.
+    import run as run_module
+    assert synthesis_mode() == "zero_shot"
+    prompt = zero_shot_prompt_text()
+    assert prompt.startswith("You are a helpful assistant.<|endofprompt|>")
+    assert "brighter place" in prompt  # the committed reference transcript
+    monkeypatch_manifest = {"tts": {"synthesis_mode": "instruct2"}}
+    saved = run_module.MANIFEST
+    try:
+        run_module.MANIFEST = monkeypatch_manifest
+        assert synthesis_mode() == "instruct2"
+    finally:
+        run_module.MANIFEST = saved
 
 
 def test_engine_flags_default_on(monkeypatch):

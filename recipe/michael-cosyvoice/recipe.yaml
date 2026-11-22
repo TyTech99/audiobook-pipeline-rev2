@@ -58,6 +58,7 @@ styles:
 
 tts:
   sample_rate: 24000      # CosyVoice 3 native output
+  synthesis_mode: zero_shot  # inference_zero_shot + verbatim transcript (upstream's canonical English path); instruct2 available via this declaration for A/B
   bitrate: "192k"
   format: "mp3"
   chunk_size: 300         # Characters per TTS call
