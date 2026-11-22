@@ -270,7 +270,7 @@ def test_e2e_convert_job_with_stub_runner(e2e_app, clean_e2e, tmp_path):
     from worker.tts.worker import RecipeRunner, TTSWorker
 
     class StubRunner(RecipeRunner):
-        def run(self, image, input_dir, output_dir, env):
+        def run(self, image, input_dir, output_dir, env, models_dir=None):
             import pathlib
             out = pathlib.Path(output_dir)
             (out / "m4b").mkdir(parents=True, exist_ok=True)
@@ -324,7 +324,7 @@ def test_e2e_convert_job_with_stub_runner(e2e_app, clean_e2e, tmp_path):
         "redis_password": os.environ.get("REDIS_PASSWORD", "audiobook-test"),
         "redis_db": 0,
         "output_prefix": str(output_dir) + "/",
-        "default_recipe_image": "audiobook-recipe-michael:local",
+        "default_recipe_image": "audiobook-recipe-michael-cosyvoice:local",
     }
 
     http = FakeHttp("http://localhost:8000/api/v1")

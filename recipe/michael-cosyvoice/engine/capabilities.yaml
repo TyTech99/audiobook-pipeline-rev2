@@ -1,0 +1,67 @@
+# CosyVoice 3 engine capabilities
+# Used by the LLM annotation prompt to know what markup is supported.
+#
+# Evidence: FunAudioLLM/Fun-CosyVoice3-0.5B-2512 model card; CosyVoice 3
+# paper (arXiv 2505.17589) §2.5, §5.6; QwenAudio/CosyVoice@074ca6dc
+# cosyvoice/cli/cosyvoice.py (inference_instruct2, inference_zero_shot).
+
+engine: "cosyvoice3"
+version: "0.5B-2512"
+repo: "QwenAudio/CosyVoice"
+
+# CosyVoice 3 is a Qwen2-LLM-based TTS with zero-shot voice cloning and a
+# natural-language instruction channel. The MVP synthesis path feeds
+# plain text; the capabilities below are what the engine can honor when
+# the annotation layer starts emitting engine markup.
+
+instruct_channel:
+  method: "inference_instruct2"
+  format: "You are a helpful assistant. <delivery direction><|endofprompt|>"
+  controls: ["emotions", "speed", "volume", "dialects", "accents", "role", "tone"]
+  note: >
+    The recipe's styles/*.j2 templates are the instruct text. The
+    reference clip supplies timbre; instruct directs delivery. Timbre
+    itself is not instruct-controllable (paper §5.6).
+
+supported_markup:
+  - type: "inline_tags"
+    tags: ["[breath]", "[laughter]"]
+    description: >
+      Natively interpreted paralinguistic tokens (paper §2.5). Not part
+      of the MVP annotation vocabulary; the walk phase emits them.
+  - type: "instruct"
+    description: "Natural-language delivery direction via inference_instruct2."
+  - type: "pronunciation_inpainting"
+    description: >
+      Chinese Pinyin and English CMU phonemes in-text (model card:
+      "suitable for production use"). Carrier for the pipeline's
+      pronunciation-performance layer.
+
+prosody_control:
+  inline: true          # [breath]/[laughter] only; no [pause Nms] control
+  via_instruct: true
+  via_punctuation: true
+  notes: >
+    Punctuation influences pauses and intonation. The MVP path strips
+    LLM performance-hint brackets ([pause] etc.) — they are not engine
+    tokens and would be read aloud.
+
+voice_cloning:
+  method: "zero-shot"
+  reference_required: true
+  reference_length: "3-10 seconds recommended (recipe uses 7.65 s)"
+  transcript: "not required for inference_instruct2 (required for inference_zero_shot)"
+
+determinism:
+  seed: true
+  note: >
+    One fixed seed per take, re-applied before every inference call —
+    advancing the RNG per call rotates the sampled speaker mid-take.
+
+limitations:
+  - "No per-word emphasis tag exercised in the MVP path"
+  - "No explicit pause duration control (use punctuation)"
+  - "Timbre is not instruct-controllable (paper §5.6)"
+  - "No text normalizer in the container (wetext dropped: its data downloads from ModelScope at model load); numbers/dates read as written — prep-stage text normalization owns them"
+  - "Singing not supported (paper §5.6)"
+  - "Long texts should be chunked (recipe: 300 chars per call)"

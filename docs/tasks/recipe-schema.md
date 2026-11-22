@@ -66,7 +66,7 @@ The performance style influences:
 
 ## Engine-Agnostic Schema Design
 
-The schema must be engine-agnostic. Chatterbox and HiggsV3 are examples among countless engines, with more emerging regularly. The core elements the schema accommodates are:
+The schema must be engine-agnostic. CosyVoice 3 and HiggsV3 are examples among countless engines, with more emerging regularly. The core elements the schema accommodates are:
 
 - How to express prosody (speed, pitch, volume)
 - How to express emotion

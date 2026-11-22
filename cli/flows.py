@@ -657,7 +657,7 @@ def _write_node_build_files(host, root: Path, prefix: str) -> None:
         "supervisor.Dockerfile",
         "worker-prep.Dockerfile",
         "worker-tts.Dockerfile",
-        "recipe-michael.Dockerfile",
+        "recipe-michael-cosyvoice.Dockerfile",
         "probe.Dockerfile",
         "build-images.sh",
     ):

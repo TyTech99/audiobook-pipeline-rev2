@@ -1,0 +1,97 @@
+name: "michael-cosyvoice"
+version: "1.0.0"
+stack: "cosyvoice3"
+
+description: >
+  Michael voice clone using CosyVoice 3 (FunAudioLLM
+  Fun-CosyVoice3-0.5B-2512, Apache-2.0). Voice sample:
+  voices/Michael.wav, cloned transcript-free via inference_instruct2;
+  the style templates are the engine instruct text. LLM annotation is
+  optional (enabled when LLM_BASE_URL and LLM_MODEL are set). Replaces
+  the retired Chatterbox recipe (#88).
+
+min_hardware:
+  gpu: true
+  vram_gb: 8
+  ram_gb: 16
+  disk_gb: 25         # Includes CosyVoice 3 weights (~5.4 GB)
+
+model:
+  source: "huggingface"
+  repo: "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
+  revision: "29e01c4e8d000f4bcd70751be16fa94bf3d85a18"
+  files:
+    - "llm.pt"
+    - "flow.pt"
+    - "hift.pt"
+    - "cosyvoice3.yaml"
+    - "config.json"
+    - "campplus.onnx"
+    - "speech_tokenizer_v3.onnx"
+    - "speech_tokenizer_v3.batch.onnx"
+    - "flow.decoder.estimator.fp32.onnx"
+    - "CosyVoice-BlankEN/model.safetensors"
+    - "CosyVoice-BlankEN/tokenizer_config.json"
+    - "CosyVoice-BlankEN/vocab.json"
+    - "CosyVoice-BlankEN/merges.txt"
+  note: >
+    Downloaded automatically on first run via huggingface_hub
+    snapshot_download at the pinned revision (COSYVOICE_MODEL_DIR
+    overrides the cache location).
+
+engine:
+  capabilities: "engine/capabilities.yaml"
+  markup_examples: "engine/markup-examples.md"
+  annotation_prompt: "engine/annotation-prompt.j2"
+  chunk_size: "paragraph"
+
+styles:
+  - name: "neutral"
+    description: "Even delivery, neutral tone, conversational register"
+    prompt: "styles/neutral.j2"
+  - name: "childrens-story"
+    description: "Bright, energetic, playful tone, light mood"
+    prompt: "styles/childrens-story.j2"
+  - name: "noir-mystery"
+    description: "Slow, gravelly, ominous tone, dark mood, elevated register"
+    prompt: "styles/noir-mystery.j2"
+
+tts:
+  sample_rate: 24000      # CosyVoice 3 native output
+  bitrate: "192k"
+  format: "mp3"
+  chunk_size: 300         # Characters per TTS call
+  voice: "voices/Michael.wav"
+  seed: 1234              # Fixed seed, re-applied per call (deterministic takes)
+
+mastering:
+  config: "mastering-chain.yaml"
+  target_rms_db: -16.0    # LUFS integrated (ACX: -23 to -18)
+  max_peak_db: -3.0
+  max_noise_floor_db: -60
+
+packaging:
+  config: "packaging.yaml"
+  formats:
+    - type: "m4b"
+      codec: "aac"
+      bitrate: "96k"
+      chapters:
+        style: "quicktime"
+        read_header: false
+    - type: "mp3"
+      codec: "mp3"
+      bitrate: "192k"
+      cbr: true
+  metadata:
+    narrator: "Michael (CosyVoice 3)"
+  cover_art:
+    required: false
+    min_size: 600
+    max_size: 1400
+    format: "jpeg"
+
+image:
+  name: "audiobook-recipe-michael-cosyvoice"
+  tag: "local"
+  dockerfile: "../../deploy/recipe-michael-cosyvoice.Dockerfile"

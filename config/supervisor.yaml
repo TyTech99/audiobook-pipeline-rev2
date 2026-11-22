@@ -36,7 +36,7 @@ docker:
   images:
     prep: "${PREP_IMAGE:-audiobook-worker-prep:local}"
     tts: "${TTS_IMAGE:-audiobook-worker-tts:local}"
-    recipe: "${RECIPE_IMAGE:-audiobook-recipe-michael:local}"
+    recipe: "${RECIPE_IMAGE:-audiobook-recipe-michael-cosyvoice:local}"
     probe: "${PROBE_IMAGE:-audiobook-probe:dev}"
 
 working_hours:

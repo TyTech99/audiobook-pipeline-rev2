@@ -277,7 +277,7 @@ The e2e test (`tests/test_e2e.py`) requires a reachable Postgres (`DATABASE_URL`
 │   ├── tts/                  ← TTS worker (book package → audio)
 │   └── common/               ← Shared storage, LLM client, settings
 ├── recipe/
-│   └── michael-chatterbox/   ← Chatterbox michael voice recipe
+│   └── michael-cosyvoice/    ← CosyVoice 3 michael voice recipe
 ├── cli/                      ← audiobookctl (install, apply, update, uninstall)
 ├── config/                   ← YAML config templates
 ├── deploy/                   ← Dockerfiles, build script, compose, examples
@@ -314,21 +314,21 @@ Every page in the source PDF appears in the page ledger with an action (`kept` o
 
 ### Voice recipe
 
-A Docker image that defines how to produce audio for a specific voice. The TTS worker runs the recipe container with the book package mounted at `/input` and writes output to `/output`. The current recipe is `recipe/michael-chatterbox/`, built at node install.
+A Docker image that defines how to produce audio for a specific voice. The TTS worker runs the recipe container with the book package mounted at `/input` and writes output to `/output`. The current recipe is `recipe/michael-cosyvoice/`, built at node install.
 
 ## Status
 
 - [x] Coordinator (FastAPI, jobs, workers, nodes)
 - [x] Supervisor (JIT container management)
 - [x] Prep worker (local-file mode)
-- [x] TTS worker (local-file mode, Chatterbox michael recipe)
+- [x] TTS worker (local-file mode, CosyVoice 3 michael recipe)
 - [x] Worker Docker images built at node install
 - [x] End-to-end job testing
 
 External dependencies for production use:
 
 - GPU with NVIDIA driver and Container Toolkit for convert jobs
-- Model download for the Chatterbox michael recipe on first run
+- Model download for the CosyVoice 3 michael recipe on first run (~5.4 GB, cached under `<storage_root>/models`)
 
 ## See also
 

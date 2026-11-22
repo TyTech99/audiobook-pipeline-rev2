@@ -22,7 +22,7 @@ logger = logging.getLogger("worker.tts")
 class RecipeRunner:
     """Runs the recipe container. Tests replace this with a stub."""
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         raise NotImplementedError
 
 
@@ -32,17 +32,24 @@ class DockerRecipeRunner(RecipeRunner):
 
         self.client = docker.from_env()
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         import docker.types
+
+        volumes = {
+            input_dir: {"bind": "/input", "mode": "ro"},
+            output_dir: {"bind": "/output", "mode": "rw"},
+        }
+        # Persistent model cache: engine weights download once, not per job
+        # (#88). The worker owns the convention (env HF_HOME=/models/huggingface);
+        # the runner only mounts the host dir at /models.
+        if models_dir:
+            volumes[str(models_dir)] = {"bind": "/models", "mode": "rw"}
 
         kwargs = {
             "image": image,
             "detach": True,
             "environment": env,
-            "volumes": {
-                input_dir: {"bind": "/input", "mode": "ro"},
-                output_dir: {"bind": "/output", "mode": "rw"},
-            },
+            "volumes": volumes,
         }
         # Use GPU when the host has one; otherwise run CPU-only.
         if os.path.exists("/dev/nvidia0"):
@@ -62,10 +69,7 @@ class DockerRecipeRunner(RecipeRunner):
                     image,
                     detach=True,
                     environment=env,
-                    volumes={
-                        input_dir: {"bind": "/input", "mode": "ro"},
-                        output_dir: {"bind": "/output", "mode": "rw"},
-                    },
+                    volumes=volumes,
                 )
             else:
                 raise
@@ -193,7 +197,7 @@ class TTSWorker:
 
     def _process_job_inner(self, job: dict, job_id: str) -> dict:
         recipe = job.get("voice_recipe", {})
-        image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael:local"
+        image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael-cosyvoice:local"
 
         import pathlib
         import tempfile
@@ -216,7 +220,28 @@ class TTSWorker:
             }
             env.update(llm_env(llm_settings_from_mapping(self.settings)))
 
-            code = self.runner.run(image, str(input_dir), str(output_dir), env)
+            # Persistent model cache: mount <storage_root>/models into the
+            # recipe container at /models and point HF_HOME there, so engine
+            # weights download once instead of per job (#88). An unwritable
+            # storage root degrades to a container-local HF cache (per-job
+            # download) instead of failing the job.
+            storage_root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+            models_dir: pathlib.Path | None = pathlib.Path(storage_root) / "models"
+            try:
+                models_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Model cache dir %s unavailable (%s); recipe will use a container-local cache",
+                    models_dir, exc,
+                )
+                models_dir = None
+            if models_dir:
+                env["HF_HOME"] = "/models/huggingface"
+
+            code = self.runner.run(
+                image, str(input_dir), str(output_dir), env,
+                models_dir=str(models_dir) if models_dir else None,
+            )
             if code != 0:
                 raise RuntimeError(f"Recipe container exited {code}")
 

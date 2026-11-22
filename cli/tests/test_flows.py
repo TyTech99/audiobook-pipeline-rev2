@@ -141,7 +141,7 @@ def _update_source_tree(tmp_path: Path) -> Path:
         "supervisor.Dockerfile",
         "worker-prep.Dockerfile",
         "worker-tts.Dockerfile",
-        "recipe-michael.Dockerfile",
+        "recipe-michael-cosyvoice.Dockerfile",
         "probe.Dockerfile",
         "build-images.sh",
     ):
@@ -250,7 +250,7 @@ def test_update_node_syncs_restarts_and_keeps_operator_config(monkeypatch, tmp_p
         "supervisor.Dockerfile",
         "worker-prep.Dockerfile",
         "worker-tts.Dockerfile",
-        "recipe-michael.Dockerfile",
+        "recipe-michael-cosyvoice.Dockerfile",
         "probe.Dockerfile",
         "build-images.sh",
     ):

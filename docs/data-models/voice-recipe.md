@@ -11,7 +11,7 @@ A voice recipe is a **self-contained bundle** that defines everything needed to 
 - Encapsulate mastering parameters (EQ, compression, loudness, noise floor)
 - Encapsulate packaging parameters (formats, codec, chapters, metadata, cover art)
 - Enable versioning and rollback
-- Support multiple TTS stacks (Chatterbox, Higgs V3, Piper, etc.)
+- Support multiple TTS stacks (CosyVoice 3, Higgs V3, Piper, etc.)
 
 ## Storage
 
@@ -55,7 +55,7 @@ voice-recipe/
 ```yaml
 name: "narrator-deep-male-v2"
 version: "2.1.0"
-stack: "chatterbox"          # TTS engine: chatterbox, higgs-v3, piper, etc.
+stack: "cosyvoice3"        # TTS engine: cosyvoice3, higgs-v3, piper, etc.
 
 # Hardware requirements
 min_hardware:
