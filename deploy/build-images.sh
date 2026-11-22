@@ -25,6 +25,9 @@ docker build -t audiobook-worker-tts:local -f "$DEPLOY/worker-tts.Dockerfile" "$
 echo "Building audiobook-recipe-michael-cosyvoice:local..."
 docker build -t audiobook-recipe-michael-cosyvoice:local -f "$DEPLOY/recipe-michael-cosyvoice.Dockerfile" "$CONTEXT"
 
+echo "Building audiobook-recipe-ggardner-indextts:local..."
+docker build -t audiobook-recipe-ggardner-indextts:local -f "$DEPLOY/recipe-ggardner-indextts.Dockerfile" "$CONTEXT"
+
 echo "Building audiobook-probe:dev..."
 docker build -t audiobook-probe:dev -f "$DEPLOY/probe.Dockerfile" "$CONTEXT"
 

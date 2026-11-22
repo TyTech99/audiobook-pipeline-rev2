@@ -1,0 +1,105 @@
+name: "ggardner-indextts"
+version: "1.0.0"
+stack: "indextts2.5"
+
+description: >
+  IndexTTS-2.5 voice recipe (Bilibili IndexTeam, bilibili Model Use
+  License — commercial use permitted below the 100M-user / RMB-1bn
+  scale cap). Voice sample: voices/ggardner.wav — Grover Gardner's
+  reading of the introduction to The Prince (public-domain text,
+  expressive human reference; verbatim transcript on file). Zero-shot
+  cloning from the single reference clip; per-segment emotion flows from
+  the annotation layer's direction cues into the engine's emo_text
+  channel (bundled QwenEmotion translates to the 8-dim vector; the
+  contract declares NO inline tags — this engine reads brackets aloud).
+  Chapters are the pool's unit of work: chapters in parallel, chunks
+  serial within each (the documented parallelism model).
+
+min_hardware:
+  gpu: true
+  vram_gb: 10
+  ram_gb: 16
+  disk_gb: 20
+
+model:
+  source: "huggingface"
+  repo: "IndexTeam/IndexTTS-2.5"
+  revision: "c39ce5ba981572cb187443877ff559dfb246ce63"
+  files:
+    - "config.yaml"
+    - "gpt.pth"
+    - "feat1.pt"
+    - "feat2.pt"
+    - "s2mel.pth"
+    - "codec.pth"
+    - "wav2vec2bert_stats.pt"
+    - "multilingual_zh_ja_yue_char_del.tiktoken"
+    - "qwen0.6bemo4-merge/"
+  note: >
+    Downloaded on first run via huggingface_hub snapshot_download at the
+    pinned revision (HF_HOME points at the persistent models cache). The
+    QwenEmotion 0.6B ships inside the snapshot — no extra download.
+
+engine:
+  capabilities: "engine/capabilities.yaml"
+  markup_examples: "engine/markup-examples.md"
+  annotation_prompt: "engine/annotation-prompt.j2"
+  chunk_size: "paragraph"
+
+styles:
+  - name: "neutral"
+    description: "Steady, warm, engaged narration — even pace, lean on the natural rhythm of the sentences"
+    prompt: "styles/neutral.j2"
+  - name: "noir-mystery"
+    description: "Slow, gravelly, ominous tone with a dark mood — deliberate pacing, weight on the reveals"
+    prompt: "styles/noir-mystery.j2"
+  - name: "childrens-story"
+    description: "Bright, energetic, playful tone with a light mood — quickened pace, lifted endings"
+    prompt: "styles/childrens-story.j2"
+
+tts:
+  sample_rate: 22050     # IndexTTS-2.5 native output
+  voice: "voices/ggardner.wav"   # zero-shot timbre + natural delivery reference
+  seed: 1234             # Fixed seed, re-applied per call (reproducible takes)
+  chunk_size: 300        # Characters per TTS call
+  overlap_ms: 200        # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms)
+  duration_factor: 1.0   # INVERTED vs CosyVoice speed: >1 slows, <1 speeds; 1.0 keeps Gardner's own pace
+  emo_alpha: 0.8        # emotion conditioning strength [0,1] (the engine's demonstrated mid grade)
+  bitrate: "192k"
+  format: "mp3"
+  engine_flags:
+    bf16: true           # IndexTTS2(use_bf16=True)
+    qwen_emo: true       # load the bundled QwenEmotion 0.6B (required for emo_text)
+    parallel_workers: 2  # chapters in flight; chunks serial inside each
+
+mastering:
+  config: "mastering-chain.yaml"
+  target_rms_db: -18.0   # LUFS integrated (ACX: -23 to -18) — the code masters here
+  max_peak_db: -3.0
+  max_noise_floor_db: -60
+  room_tone_ms:
+    head: 1000
+    tail: 3000
+
+packaging:
+  config: "packaging.yaml"
+  formats:
+    - type: "m4b"
+      codec: "aac"
+      bitrate: "96k"
+      chapters:
+        style: "both"       # quicktime + nero (docs: audiobook-package.md mandates both)
+        read_header: false
+    - type: "mp3"
+      codec: "mp3"
+      bitrate: "192k"
+      cbr: true
+  metadata:
+    narrator: "Michael (IndexTTS-2.5)"   # placeholder until the voice's narrator name is ruled
+  cover_art:
+    required: false
+
+image:
+  name: "audiobook-recipe-ggardner-indextts"
+  tag: "local"
+  dockerfile: "../../deploy/recipe-ggardner-indextts.Dockerfile"

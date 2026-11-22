@@ -1,0 +1,67 @@
+"""Unit tests for the ggardner-indextts recipe helpers (no torch needed).
+
+The heart of this file is the annotation-contract check: the engine's
+declared vocabulary is EXACTLY what IndexTTS-2.5 consumes — no inline
+tags (this engine reads brackets aloud) and the 8-emotion direction
+channel that flows into emo_text.
+"""
+
+import sys
+import pathlib
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+
+from common.annotation import AnnotationContract, sanitize_direction  # noqa: E402
+import run  # noqa: E402
+
+
+CAPABILITIES = run.CAPABILITIES_PATH
+
+
+def test_contract_declares_no_inline_tags():
+    contract = AnnotationContract.from_capabilities(CAPABILITIES)
+    assert contract.configured is True          # instruct channel declared
+    assert contract.inline_tags == ()           # IndexTTS reads brackets aloud — none declared
+    assert contract.declared_tag_set == frozenset()
+
+
+def test_contract_declares_exactly_the_engine_emotions():
+    contract = AnnotationContract.from_capabilities(CAPABILITIES)
+    assert sorted(contract.instruct_controls) == [
+        "afraid", "angry", "calm", "disgusted",
+        "happy", "melancholic", "sad", "surprised",
+    ]
+    assert contract.max_direction_words == 8
+    assert contract.engine == "indextts2.5"
+
+
+def test_direction_from_cues_sanitizes_and_passes_through():
+    cues = {"direction": "somber, quietly resolute"}
+    out = run.direction_from_cues(cues, max_words=8)
+    assert out is not None and "somber" in out and "[a" not in out
+
+
+def test_direction_from_cues_none_cases():
+    assert run.direction_from_cues(None, 8) is None
+    assert run.direction_from_cues({}, 8) is None
+    assert run.direction_from_cues({"direction": ""}, 8) is None
+    assert run.direction_from_cues({"direction": "<|junk|>"}, 8) is None or "[" not in str(run.direction_from_cues({"direction": "<|junk|>"}, 8))
+
+
+def test_declarations_read_from_recipe_yaml():
+    assert run.declared_speed() == 1.0          # duration_factor: Gardner's own pace
+    assert run.declared_emo_alpha() == 0.8
+    assert run.parallel_workers() == 2
+    assert run._declared_voice == "voices/ggardner.wav"
+    assert run.INDEXTTS_REVISION == "c39ce5ba981572cb187443877ff559dfb246ce63"
+
+
+def test_reference_and_transcript_ship_with_the_recipe():
+    assert run.VOICE_PATH.exists()
+    assert pathlib.Path(str(run.VOICE_PATH) + ".transcript.txt").exists()
+
+
+def test_sanitize_direction_clamps_to_word_budget():
+    out = sanitize_direction("a very long direction with many many words in it", 4)
+    assert len(out.split()) <= 4
