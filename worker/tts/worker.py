@@ -69,19 +69,19 @@ class DockerRecipeRunner(RecipeRunner):
             ]
         elif device.lower() == "all" or (not device and os.path.exists("/dev/nvidia0")):
             kwargs["device_requests"] = [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
+        # GPU or fail (#103): a TTS recipe container without a GPU device
+        # request is a configuration error, and a failed GPU launch is
+        # never retried on CPU — the job fails loudly instead.
+        if "device_requests" not in kwargs:
+            raise RuntimeError(
+                "no GPU device request for the recipe container "
+                "(GPU_DEVICE unset and no host NVIDIA device) — "
+                "TTS is GPU-or-fail (#103)"
+            )
         try:
             container = self.client.containers.run(**kwargs)
         except Exception as exc:
-            if "nvidia" in str(exc).lower() or "gpu" in str(exc).lower():
-                # Retry without GPU if the request failed.
-                container = self.client.containers.run(
-                    image,
-                    detach=True,
-                    environment=env,
-                    volumes=volumes,
-                )
-            else:
-                raise
+            raise RuntimeError(f"recipe container GPU launch failed: {exc}") from exc
         try:
             result = container.wait(timeout=7200)
             return int(result.get("StatusCode", 1))

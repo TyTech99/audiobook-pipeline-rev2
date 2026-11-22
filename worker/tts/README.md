@@ -8,7 +8,7 @@ The TTS worker claims jobs from the Redis `convert` queue, downloads the book pa
 
 ## Implementation status
 
-Implemented (local-file mode, CosyVoice 3 michael recipe). The worker loop claims convert jobs and runs the recipe container. The worker Dockerfile is at `deploy/worker-tts.Dockerfile` and is built at node install. The recipe Dockerfile is at `deploy/recipe-michael-cosyvoice.Dockerfile`. The recipe container gets `<storage_root>/models` mounted at `/models` with `HF_HOME=/models/huggingface`, so engine weights download once instead of per job.
+Implemented (local-file mode, CosyVoice 3 michael recipe). The worker loop claims convert jobs and runs the recipe container. The worker Dockerfile is at `deploy/worker-tts.Dockerfile` and is built at node install. The recipe Dockerfile is at `deploy/recipe-michael-cosyvoice.Dockerfile`. The recipe container gets `<storage_root>/models` mounted at `/models` with `HF_HOME=/models/huggingface`, so engine weights download once instead of per job. TTS is GPU-or-fail (#103): the worker refuses to launch a recipe container without a GPU device request and never retries a GPU-launch failure on CPU.
 
 ## How it runs
 

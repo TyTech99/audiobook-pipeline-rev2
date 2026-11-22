@@ -642,6 +642,16 @@ def main() -> int:
         log.error("Voice file %s does not exist", VOICE_PATH)
         return 1
 
+    # GPU or fail (#103): synthesis never runs CPU-only. A missing CUDA
+    # device is a loud failure, not a silent ~27x slowdown — and the
+    # engine would silently disable fp16/TRT on top of it.
+    if get_device() != "cuda":
+        log.error(
+            "No CUDA device visible to the recipe — TTS is GPU-or-fail (#103). "
+            "Check the worker's GPU device request (GPU_DEVICE)."
+        )
+        return 1
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "m4b").mkdir(parents=True, exist_ok=True)
     (OUTPUT_DIR / "mp3").mkdir(parents=True, exist_ok=True)

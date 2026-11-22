@@ -29,6 +29,8 @@ Face via `snapshot_download` (network required once, or pre-warm
 
 ## Known limits
 
+- **GPU required**: this recipe is GPU-or-fail (#103) — it exits 1 without
+  CUDA and never synthesizes CPU-only.
 - No text normalizer in the container: upstream's wetext downloads its
   data from ModelScope at model load, which breaks self-contained runs,
   so it is dropped. Numbers, dates and symbols are read as written —
