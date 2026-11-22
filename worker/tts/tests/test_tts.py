@@ -150,6 +150,7 @@ def test_tts_worker_process_job(tmp_path):
         "redis_host": "localhost",
         "redis_port": 6379,
         "output_prefix": str(output_prefix) + "/",
+        "storage_root": str(tmp_path),
         "llm": {
             "base_url": "http://llm:8080/v1",
             "api_key": "llm-key",
@@ -235,6 +236,7 @@ def test_tts_worker_fails_on_nonzero_exit(tmp_path):
         "redis_host": "localhost",
         "redis_port": 6379,
         "output_prefix": str(tmp_path / "out") + "/",
+        "storage_root": str(tmp_path),
     }
     worker = TTSWorker(settings, runner=runner, http=http, redis_client=FakeRedis())
 

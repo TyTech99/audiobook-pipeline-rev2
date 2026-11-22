@@ -32,7 +32,7 @@ class MemoryHost:
     def local_ips(self) -> list[str]:
         return list(self.ips)
 
-    def read(self, path: str) -> str | None:
+    def read(self, path: str) -> str | bytes | None:
         return self.files.get(path)
 
     def write(self, path: str, content: str) -> None:

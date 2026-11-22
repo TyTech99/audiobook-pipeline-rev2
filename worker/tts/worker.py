@@ -203,13 +203,20 @@ class TTSWorker:
         image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael-cosyvoice:local"
 
         import pathlib
-        import tempfile
+        import shutil
 
-        with tempfile.TemporaryDirectory() as tmp:
-            input_dir = pathlib.Path(tmp) / "input"
-            output_dir = pathlib.Path(tmp) / "output"
-            input_dir.mkdir()
-            output_dir.mkdir()
+        # Bind mounts are resolved by the Docker daemon on the HOST. A
+        # container-local tempfile.TemporaryDirectory() does not exist there,
+        # so the recipe container would receive an empty /input (#92). Stage
+        # job data under the storage root, which is mounted into this worker
+        # at the same absolute path the daemon binds from.
+        storage_root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+        job_root = pathlib.Path(storage_root) / "tmp" / job_id
+        input_dir = job_root / "input"
+        output_dir = job_root / "output"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
 
             package_url = job.get("package_url") or job.get("input_url") or ""
             if not package_url:
@@ -228,7 +235,6 @@ class TTSWorker:
             # weights download once instead of per job (#88). An unwritable
             # storage root degrades to a container-local HF cache (per-job
             # download) instead of failing the job.
-            storage_root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
             models_dir: pathlib.Path | None = pathlib.Path(storage_root) / "models"
             try:
                 models_dir.mkdir(parents=True, exist_ok=True)
@@ -248,9 +254,13 @@ class TTSWorker:
             if code != 0:
                 raise RuntimeError(f"Recipe container exited {code}")
 
-            root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+            root = storage_root
             output_prefix = self.settings.get("output_prefix") or f"file://{root}/audio/{job_id}/"
             output_url = upload_dir(output_dir, output_prefix)
+        finally:
+            # Job staging cleanup; a crash leaves inert data under
+            # <storage_root>/tmp/, never a broken bind path.
+            shutil.rmtree(job_root, ignore_errors=True)
 
         self.http.post(
             f"{self.coordinator_url}/jobs/{job_id}/complete",

@@ -324,6 +324,7 @@ def test_e2e_convert_job_with_stub_runner(e2e_app, clean_e2e, tmp_path):
         "redis_password": os.environ.get("REDIS_PASSWORD", "audiobook-test"),
         "redis_db": 0,
         "output_prefix": str(output_dir) + "/",
+        "storage_root": str(output_dir),
         "default_recipe_image": "audiobook-recipe-michael-cosyvoice:local",
     }
 
