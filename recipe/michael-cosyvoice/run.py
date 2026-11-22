@@ -343,6 +343,8 @@ def build_m4b_from_wav(
 
     # Patch stik=2 into the M4B (ffmpeg doesn't set this atom)
     _patch_stik(m4b_path)
+    # Nero chapter markers for VLC/Android (docs: chapters.style BOTH)
+    _patch_nero_chapters(m4b_path, chapters or [])
 
 
 def _patch_stik(m4b_path: pathlib.Path) -> None:
@@ -362,6 +364,50 @@ def _patch_stik(m4b_path: pathlib.Path) -> None:
     # Append stik box: size(8) + 'stik' + value(2)
     stik_box = struct.pack(">I", 8) + b"stik" + struct.pack(">I", 2)
     m4b_path.write_bytes(data + stik_box)
+
+
+def _patch_nero_chapters(m4b_path: pathlib.Path, chapters: list[dict[str, Any]]) -> None:
+    """Insert a Nero chpl atom (VLC/Android chapter markers) into the M4B.
+
+    The docs require packaging.formats[].chapters.style: BOTH — a
+    QuickTime chapter track (Apple Books, written by ffmpeg) AND a Nero
+    chpl atom (voice-recipe.md: 'nero (VLC/Android)'). ffmpeg cannot
+    write chpl, so this splices it into moov/udta and fixes the box
+    sizes. No-op when a chpl already exists.
+    """
+    if not chapters:
+        return
+    data = m4b_path.read_bytes()
+    if b"chpl" in data:
+        return
+
+    # chpl payload: version(1)=1, reserved(3), count(4 BE), then per
+    # chapter: start in 100ns ticks (8 BE), title length (2 BE), title.
+    payload = struct.pack(">B3s", 1, b"\x00\x00\x00") + struct.pack(">I", len(chapters))
+    for ch in chapters:
+        start_ms = int(ch.get("start_ms", 0))
+        title = str(ch.get("title", ""))[:255].encode("utf-8")
+        payload += struct.pack(">Q", start_ms * 10000)  # ms -> 100ns ticks
+        payload += struct.pack(">H", len(title)) + title
+    chpl_box = struct.pack(">I", 8 + len(payload)) + b"chpl" + payload
+
+    moov_idx = data.find(b"moov")
+    if moov_idx < 4:
+        log.warning("no moov box found; skipping Nero chapters")
+        return
+    udta_idx = data.find(b"udta", moov_idx)
+    if udta_idx < 4:
+        log.warning("no udta box found; skipping Nero chapters")
+        return
+    moov_size = struct.unpack(">I", data[moov_idx - 4 : moov_idx])[0]
+    udta_size = struct.unpack(">I", data[udta_idx - 4 : udta_idx])[0]
+    insert_at = udta_idx + udta_size  # end of udta = next box inside moov
+
+    out = bytearray(data[:insert_at]) + bytearray(chpl_box) + bytearray(data[insert_at:])
+    struct.pack_into(">I", out, udta_idx - 4, udta_size + len(chpl_box))
+    struct.pack_into(">I", out, moov_idx - 4, moov_size + len(chpl_box))
+    m4b_path.write_bytes(bytes(out))
+    log.info("Nero chapters written: %d markers (chpl atom)", len(chapters))
 
 
 def make_silence_wav(path: pathlib.Path, seconds: float, sample_rate: int = PACK_SAMPLE_RATE) -> None:
@@ -1345,6 +1391,7 @@ def main() -> int:
 
     qc_report = {
         "acx_compliant": acx["acx_compliant"],
+        "reference_hash": f"sha256:{__import__('hashlib').sha256(VOICE_PATH.read_bytes()).hexdigest()}",
         "acx_measurements": acx["measured"],
         "acx_checks": acx["checks"],
         "segment_failures": segment_failures,
