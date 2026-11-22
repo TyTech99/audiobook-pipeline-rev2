@@ -131,6 +131,7 @@ def _load_job(conn: Connection, job_id) -> dict:
 
 
 def _public(row: dict) -> dict:
+    metadata = row["metadata"] or {}
     return {
         "job_id": str(row["job_id"]),
         "type": row["type"],
@@ -145,6 +146,15 @@ def _public(row: dict) -> dict:
         "progress": row["progress"],
         "error": row["error"],
         "retry_count": row["retry_count"],
+        # The TTS worker replaces the queue message with this row before
+        # launching the recipe container (worker.py idempotency check),
+        # so the recipe selection must ride on the row itself, with the
+        # same convert-phase-overrides-metadata semantics the retry
+        # message builder uses.
+        "voice_recipe": (row["convert"] or {}).get("voice_recipe") or metadata.get("voice_recipe") or {},
+        "performance_style": (row["convert"] or {}).get("performance_style")
+        or metadata.get("performance_style")
+        or "neutral",
         "created_at": iso(row["created_at"]),
         "updated_at": iso(row["updated_at"]),
     }
