@@ -89,4 +89,4 @@ annotation_contract:
       it is passed to IndexTTS emo_text verbatim.
   punctuation_rules: []       # pacing comes from the engine's own text handling — nothing to adjust
   retries: 2
-  direction_granularity: chapter  # #120: ONE held direction per chapter (chapters are emotional reset points) — no per-segment flips
+  direction_granularity: segment  # guide: per-scene explicit emo_text for key moments; natural narrator varies per passage

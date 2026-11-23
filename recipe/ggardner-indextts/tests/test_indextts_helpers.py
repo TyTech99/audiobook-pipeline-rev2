@@ -80,7 +80,7 @@ def test_chaining_declaration_read_from_recipe_yaml():
 
 def test_contract_declares_chapter_held_directions():
     contract = AnnotationContract.from_capabilities(CAPABILITIES)
-    assert contract.direction_granularity == "chapter"   # #120: one held direction per chapter
+    assert contract.direction_granularity == "segment"  # guide: per-scene explicit emo_text for natural narrator behavior
 
 
 def test_engine_declarations_for_120():
