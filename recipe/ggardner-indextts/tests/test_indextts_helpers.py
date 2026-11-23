@@ -58,7 +58,7 @@ def test_direction_from_cues_none_cases():
 
 def test_declarations_read_from_recipe_yaml():
     assert run.declared_speed() == 1.0          # duration_factor: Gardner's own pace
-    assert run.declared_emo_alpha() == 0.8
+    assert run.declared_emo_alpha() == 0.55
     assert run.parallel_workers() == 2
     assert run._declared_voice == "voices/ggardner.wav"
     assert run.INDEXTTS_REVISION == "c39ce5ba981572cb187443877ff559dfb246ce63"
