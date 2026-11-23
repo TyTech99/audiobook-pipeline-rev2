@@ -140,6 +140,44 @@ def declared_emo_alpha() -> float:
     return max(0.0, min(1.0, value))
 
 
+_EMOTION_MODES = ("emo_text", "emo_vector")
+_DEFAULT_EMOTION_VECTOR = [0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.0, 0.8]
+
+
+def declared_emotion_mode() -> str:
+    """Which emotion channel drives synthesis: 'emo_text' (QwenEmotion
+    translates the annotation direction to the 8-dim vector — the
+    default) or 'emo_vector' (a declared 8-dim vector passed directly,
+    graded control bypassing QwenEmotion). Env override RECIPE_EMOTION_MODE."""
+    declared = (MANIFEST.get("tts") or {}).get("emotion_mode", "emo_text")
+    env = os.environ.get("RECIPE_EMOTION_MODE", str(declared))
+    mode = str(env).strip().lower()
+    if mode not in _EMOTION_MODES:
+        mode = "emo_text"
+    return mode
+
+
+def declared_emotion_vector() -> list[float]:
+    """The 8-dim emotion vector [happy, angry, sad, afraid, disgusted,
+    melancholic, surprised, calm] used when emotion_mode == 'emo_vector'.
+    Each entry clamped to [0, 1.2] (engine range). Env override
+    RECIPE_EMOTION_VECTOR (comma-separated 8 floats)."""
+    raw = os.environ.get("RECIPE_EMOTION_VECTOR")
+    if raw is None:
+        raw = (MANIFEST.get("tts") or {}).get("emotion_vector", _DEFAULT_EMOTION_VECTOR)
+    try:
+        if isinstance(raw, str):
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            vals = [float(p) for p in parts]
+        else:
+            vals = [float(v) for v in raw]
+    except (TypeError, ValueError):
+        vals = list(_DEFAULT_EMOTION_VECTOR)
+    if len(vals) != 8:
+        vals = list(_DEFAULT_EMOTION_VECTOR)
+    return [max(0.0, min(1.2, v)) for v in vals]
+
+
 def bf16_enabled() -> bool:
     declared = (MANIFEST.get("tts") or {}).get("engine_flags", {}).get("bf16", True)
     env = os.environ.get("RECIPE_BF16", "1" if declared else "0")
@@ -326,7 +364,9 @@ def _infer_guarded(model, kwargs: dict[str, Any]) -> None:
 
 def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | None, seed: int,
                    emo_alpha: float, duration_factor: float, use_qwen_emo: bool,
-                   spk_prompt: str | None = None) -> None:
+                   spk_prompt: str | None = None,
+                   emotion_mode: str = "emo_text",
+                   emotion_vector: list[float] | None = None) -> None:
     """Synthesize one chunk. The seed is re-applied before every call so
     the take is reproducible. use_random stays off (it degrades cloning
     fidelity). A missing/failed emotion-text channel degrades to the
@@ -353,17 +393,20 @@ def generate_chunk(model, text: str, output_wav: pathlib.Path, direction: str | 
         max_text_tokens_per_segment=declared_segment_tokens(),
         interval_silence=declared_interval_silence_ms(),
     )
-    if direction and use_qwen_emo:
+    if emotion_mode == "emo_vector" and emotion_vector is not None:
+        kwargs.update(emo_vector=list(emotion_vector), emo_alpha=emo_alpha)
+    elif direction and use_qwen_emo:
         kwargs.update(use_emo_text=True, emo_text=direction, emo_alpha=emo_alpha)
     try:
         _infer_guarded(model, kwargs)
     except Exception:
-        if not (direction and use_qwen_emo):
+        if not (emotion_mode == "emo_vector" or (direction and use_qwen_emo)):
             raise
         # Emotion channel failed: degrade to the reference delivery.
         log.warning("emo_text channel failed for %s; neutral take with the reference delivery", output_wav.name)
         kwargs.pop("use_emo_text", None)
         kwargs.pop("emo_text", None)
+        kwargs.pop("emo_vector", None)
         kwargs.pop("emo_alpha", None)
         _infer_guarded(model, kwargs)
 
@@ -375,7 +418,9 @@ def _new_chain_counters() -> dict[str, int]:
 
 def _run_chain(model, chain: list[tuple], use_qwen_emo: bool, max_words: int,
                emo_alpha: float, duration_factor: float,
-               chaining: bool) -> tuple[dict[int, str | None], dict[str, int]]:
+               chaining: bool,
+               emotion_mode: str = "emo_text",
+               emotion_vector: list[float] | None = None) -> tuple[dict[int, str | None], dict[str, int]]:
     """One chapter's chunks serially (#115 pool shape; chapters are the
     unit of parallelism). Tone carry (#119): the chain starts at the
     canonical reference (chapter = emotional reset point), every later
@@ -399,7 +444,8 @@ def _run_chain(model, chain: list[tuple], use_qwen_emo: bool, max_words: int,
             counts["chained"] += 1
         try:
             generate_chunk(model, text, pathlib.Path(out_path), direction, seed,
-                           emo_alpha, duration_factor, use_qwen_emo, spk_prompt=ref)
+                           emo_alpha, duration_factor, use_qwen_emo, spk_prompt=ref,
+                           emotion_mode=emotion_mode, emotion_vector=emotion_vector)
             results[idx] = None
             last_good = out_path
         except Exception as exc:  # noqa: BLE001 - per-chunk fallback
@@ -417,9 +463,10 @@ def _pool_init(model_dir: str, bf16: bool, use_qwen_emo: bool) -> None:
 
 
 def _pool_chain(args: tuple) -> tuple[dict[int, str | None], dict[str, int]]:
-    chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining = args
+    chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining, emotion_mode, emotion_vector = args
     try:
-        return _run_chain(_POOL_MODEL, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining)
+        return _run_chain(_POOL_MODEL, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining,
+                          emotion_mode=emotion_mode, emotion_vector=emotion_vector)
     except Exception as exc:  # noqa: BLE001 - a dead engine fails its whole chain
         return {task[0]: str(exc) for task in chain}, _new_chain_counters()
 
@@ -427,7 +474,9 @@ def _pool_chain(args: tuple) -> tuple[dict[int, str | None], dict[str, int]]:
 def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int,
                        use_qwen_emo: bool, max_words: int,
                        emo_alpha: float, duration_factor: float,
-                       chaining: bool) -> tuple[dict[int, str | None], dict[str, int]]:
+                       chaining: bool,
+                       emotion_mode: str = "emo_text",
+                       emotion_vector: list[float] | None = None) -> tuple[dict[int, str | None], dict[str, int]]:
     """Chapters in parallel (one chain per worker process), chunks serial
     within each — the documented parallelism model."""
     if n_parallel <= 1 or len(chains) <= 1:
@@ -435,7 +484,8 @@ def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int
         results: dict[int, str | None] = {}
         counts = _new_chain_counters()
         for chain in chains:
-            r, c = _run_chain(model, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining)
+            r, c = _run_chain(model, chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining,
+                              emotion_mode=emotion_mode, emotion_vector=emotion_vector)
             results.update(r)
             for key, value in c.items():
                 counts[key] = counts.get(key, 0) + value
@@ -449,7 +499,7 @@ def synthesize_chains(chains: list[list[tuple]], model_dir: str, n_parallel: int
     ctx = mp.get_context("spawn")
     with ctx.Pool(n_parallel, initializer=_pool_init, initargs=(model_dir, bf16_enabled(), use_qwen_emo)) as pool:
         outputs = pool.map(_pool_chain, [
-            (chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining) for chain in chains
+            (chain, use_qwen_emo, max_words, emo_alpha, duration_factor, chaining, emotion_mode, emotion_vector) for chain in chains
         ])
     results = {}
     counts = _new_chain_counters()
@@ -674,9 +724,14 @@ def main() -> int:
 
     model_dir = resolve_model_dir()
     synth_start = time.time()
+    emotion_mode = declared_emotion_mode()
+    emotion_vector = declared_emotion_vector() if emotion_mode == "emo_vector" else None
+    log.info("Emotion mode: %s%s", emotion_mode,
+             (" vector=" + str(emotion_vector)) if emotion_vector is not None else "")
     errors, chain_counts = synthesize_chains(
         chains, model_dir, n_parallel, use_qwen_emo,
-        contract.max_direction_words, emo_alpha, duration_factor, chaining)
+        contract.max_direction_words, emo_alpha, duration_factor, chaining,
+        emotion_mode=emotion_mode, emotion_vector=emotion_vector)
     synthesis_seconds = time.time() - synth_start
 
     failed_segments = 0
@@ -825,7 +880,7 @@ def main() -> int:
             "model_repo": INDEXTTS_REPO,
             "model_revision": INDEXTTS_REVISION,
             "code_revision": "d9e41aac89fd00b3d71497fddb287b7f24613712",
-            "mode": "zero_shot_clone+emo_text",
+            "mode": "zero_shot_clone+emo_vector" if emotion_mode == "emo_vector" else "zero_shot_clone+emo_text",
             "voice": _declared_voice,
             "seed": seed,
             "bf16": bf16,
@@ -834,6 +889,8 @@ def main() -> int:
             "emo_alpha": emo_alpha,
             "parallel_workers": n_parallel,
             "chaining": chaining,
+            "emotion_mode": emotion_mode,
+            "emotion_vector": emotion_vector,
             "segment_tokens": declared_segment_tokens(),
             "interval_silence_ms": declared_interval_silence_ms(),
             "seam_pause_ms": declared_seam_pause_ms(),

@@ -148,7 +148,7 @@ def test_next_reference_carries_the_last_good_take():
 def test_run_chain_counters_measure_tone_carry(monkeypatch, tmp_path):
     calls = []
 
-    def fake_generate(model, text, out_wav, direction, seed, emo_alpha, df, qwen, spk_prompt=None):
+    def fake_generate(model, text, out_wav, direction, seed, emo_alpha, df, qwen, spk_prompt=None, **kwargs):
         calls.append(spk_prompt)
         pathlib.Path(out_wav).write_bytes(b"wav")
         if "boom" in text:
@@ -171,7 +171,7 @@ def test_run_chain_counters_measure_tone_carry(monkeypatch, tmp_path):
 def test_run_chain_with_chaining_off_is_canonical_everywhere(monkeypatch, tmp_path):
     calls = []
 
-    def fake_generate(model, text, out_wav, direction, seed, emo_alpha, df, qwen, spk_prompt=None):
+    def fake_generate(model, text, out_wav, direction, seed, emo_alpha, df, qwen, spk_prompt=None, **kwargs):
         calls.append(spk_prompt)
         pathlib.Path(out_wav).write_bytes(b"wav")
 
@@ -184,3 +184,34 @@ def test_run_chain_with_chaining_off_is_canonical_everywhere(monkeypatch, tmp_pa
     assert results[0] is None and results[1] is None
     assert counts["chained"] == 0 and counts["re_anchor"] == 2
     assert calls == [str(run.VOICE_PATH), str(run.VOICE_PATH)]  # regression guard: pre-#119 behavior
+
+
+def test_declared_emotion_mode_defaults_and_validates():
+    import run
+    # default from manifest (emo_text)
+    assert run.declared_emotion_mode() in ("emo_text", "emo_vector")
+    # env override
+    import os
+    os.environ["RECIPE_EMOTION_MODE"] = "emo_vector"
+    assert run.declared_emotion_mode() == "emo_vector"
+    os.environ["RECIPE_EMOTION_MODE"] = "garbage"
+    assert run.declared_emotion_mode() == "emo_text"
+    del os.environ["RECIPE_EMOTION_MODE"]
+
+
+def test_declared_emotion_vector_clamps_and_length():
+    import run, os
+    os.environ["RECIPE_EMOTION_VECTOR"] = "2.0, -1, 0, 0, 0, 0.2, 0, 0.8, 9"  # 9 -> fallback
+    v = run.declared_emotion_vector()
+    assert len(v) == 8
+    # fallback to default length 8
+    assert v == run._DEFAULT_EMOTION_VECTOR
+    os.environ["RECIPE_EMOTION_VECTOR"] = "0.3,0,0.2,0,0,0.4,0.15,0.3"
+    v = run.declared_emotion_vector()
+    assert len(v) == 8
+    assert v[0] == 0.3 and v[5] == 0.4
+    # clamp
+    os.environ["RECIPE_EMOTION_VECTOR"] = "1.5,0,0,0,0,0,0,0"
+    v = run.declared_emotion_vector()
+    assert v[0] == 1.2
+    del os.environ["RECIPE_EMOTION_VECTOR"]
