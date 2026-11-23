@@ -1,0 +1,116 @@
+name: "michael-cosyvoice"
+version: "1.0.0"
+stack: "cosyvoice3"
+
+description: >
+  CosyVoice 3 voice recipe (FunAudioLLM
+  Fun-CosyVoice3-0.5B-2512, Apache-2.0). Voice sample:
+  voices/ggardner.wav — Grover Gardner's reading of the introduction
+  to The Prince (public-domain text, expressive human reference;
+  verbatim transcript on file; the flat demo clip voices/Michael.wav
+  stays bundled for A/B). Zero-shot transfers the reference's
+  delivery; chapters synthesize as serial chunk chains with
+  rolling-reference tone priming (#115) — each chunk after a
+  chapter's first primes from the previous chunk's tail, and each
+  chapter resets to the canonical reference. LLM annotation is
+  optional (enabled when LLM_BASE_URL and LLM_MODEL are set).
+  Replaces the retired Chatterbox recipe (#88).
+
+min_hardware:
+  gpu: true
+  vram_gb: 8
+  ram_gb: 16
+  disk_gb: 25         # Includes CosyVoice 3 weights (~5.4 GB)
+
+model:
+  source: "huggingface"
+  repo: "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
+  revision: "29e01c4e8d000f4bcd70751be16fa94bf3d85a18"
+  files:
+    - "llm.pt"
+    - "flow.pt"
+    - "hift.pt"
+    - "cosyvoice3.yaml"
+    - "config.json"
+    - "campplus.onnx"
+    - "speech_tokenizer_v3.onnx"
+    - "speech_tokenizer_v3.batch.onnx"
+    - "flow.decoder.estimator.fp32.onnx"
+    - "CosyVoice-BlankEN/model.safetensors"
+    - "CosyVoice-BlankEN/tokenizer_config.json"
+    - "CosyVoice-BlankEN/vocab.json"
+    - "CosyVoice-BlankEN/merges.txt"
+  note: >
+    Downloaded automatically on first run via huggingface_hub
+    snapshot_download at the pinned revision (COSYVOICE_MODEL_DIR
+    overrides the cache location).
+
+engine:
+  capabilities: "engine/capabilities.yaml"
+  markup_examples: "engine/markup-examples.md"
+  annotation_prompt: "engine/annotation-prompt.j2"
+  chunk_size: "paragraph"
+
+styles:
+  - name: "neutral"
+    description: "Even delivery, neutral tone, conversational register"
+    prompt: "styles/neutral.j2"
+  - name: "childrens-story"
+    description: "Bright, energetic, playful tone, light mood"
+    prompt: "styles/childrens-story.j2"
+  - name: "noir-mystery"
+    description: "Slow, gravelly, ominous tone, dark mood, elevated register"
+    prompt: "styles/noir-mystery.j2"
+
+tts:
+  sample_rate: 24000      # CosyVoice 3 native output
+  synthesis_mode: zero_shot  # inference_zero_shot + verbatim transcript (upstream's canonical English path); instruct2 available via this declaration for A/B
+  speed: 0.9               # rendered-duration scale; the reference's brisk pace transfers in zero-shot and the ear ruled "very fast"
+  priming: true            # Rolling-reference tone handoff (#115): each chunk after a chapter's first primes from the previous chunk's tail; RECIPE_PRIMING=0 kills it
+  priming_tail_ms: 6000    # priming clip length — stays inside the engine's trained 3-10s reference range (engine/capabilities.yaml)
+  priming_whole_max_ms: 15000  # tier-2 cap: prime with the WHOLE previous chunk when no clean sentence cut exists (measured: comma pauses make exact cuts rare)
+  overlap_ms: 200          # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms); the tone handoff itself is priming's job (#115)
+  bitrate: "192k"
+  format: "mp3"
+  chunk_size: 300         # Characters per TTS call
+  voice: "voices/ggardner.wav"  # expressive human reference — Grover Gardner reading the public-domain introduction to The Prince; the flat demo clip voices/Michael.wav stays bundled for A/B
+  seed: 1234              # Fixed seed, re-applied per call (deterministic takes)
+  engine_flags:           # Performance flags (#93); RECIPE_* envs are kill switches
+    fp16: true            # autocast LLM + flow (bandwidth-bound LLM: halves traffic)
+    trt_flow: true        # TensorRT plan for the flow estimator (fp16-mode plan; upstream cautions — ear-test gated)
+    parallel_workers: 2   # chapter chains in flight (#115); chunks run serially inside a chain
+
+mastering:
+  config: "mastering-chain.yaml"
+  target_rms_db: -16.0    # LUFS integrated (ACX: -23 to -18)
+  max_peak_db: -3.0
+  max_noise_floor_db: -60
+  room_tone_ms:
+    head: 1000            # 1–5 seconds of room tone at chapter start (docs: voice-recipe.md)
+    tail: 3000            # 1–5 seconds of room tone at chapter end (docs: voice-recipe.md)
+
+packaging:
+  config: "packaging.yaml"
+  formats:
+    - type: "m4b"
+      codec: "aac"
+      bitrate: "96k"
+      chapters:
+        style: "quicktime"
+        read_header: false
+    - type: "mp3"
+      codec: "mp3"
+      bitrate: "192k"
+      cbr: true
+  metadata:
+    narrator: "Michael (CosyVoice 3)"
+  cover_art:
+    required: false
+    min_size: 600
+    max_size: 1400
+    format: "jpeg"
+
+image:
+  name: "audiobook-recipe-michael-cosyvoice"
+  tag: "local"
+  dockerfile: "../../deploy/recipe-michael-cosyvoice.Dockerfile"

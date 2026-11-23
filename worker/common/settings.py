@@ -20,7 +20,7 @@ def flatten_worker_settings(raw: dict) -> dict:
       - llm nested block kept as `llm`
       - output_prefix from processing.output_prefix or STORAGE_ROOT-based default
       - default_recipe_image from env DEFAULT_RECIPE_IMAGE or top-level or
-        `audiobook-recipe-michael:local`
+        `audiobook-recipe-michael-cosyvoice:local`
     """
     raw = raw or {}
     worker = raw.get("worker") or {}
@@ -71,7 +71,7 @@ def flatten_worker_settings(raw: dict) -> dict:
     default_recipe_image = (
         os.environ.get("DEFAULT_RECIPE_IMAGE", "").strip()
         or str(raw.get("default_recipe_image", "")).strip()
-        or "audiobook-recipe-michael:local"
+        or "audiobook-recipe-michael-cosyvoice:local"
     )
 
     return {

@@ -33,7 +33,7 @@ def settings(**overrides) -> SupervisorSettings:
         probe_image="audiobook-probe:dev",
         prep_image="audiobook-prep:latest",
         tts_image="audiobook-tts:latest",
-        recipe_image="audiobook-recipe-michael:local",
+        recipe_image="audiobook-recipe-michael-cosyvoice:local",
         queues=["prep", "convert"],
         working_hours={"enabled": False, "start": "22:00", "end": "08:00", "timezone": "UTC"},
         heartbeat_interval_seconds=30,
@@ -109,7 +109,7 @@ def test_docker_manager_starts_tts_worker():
     assert "audiobook-worker-tts" in runner.running_containers
     match = next(r for r in runner.runs if r[0] == "audiobook-worker-tts")
     assert match[1] == "audiobook-tts:latest"
-    assert match[2]["DEFAULT_RECIPE_IMAGE"] == "audiobook-recipe-michael:local"
+    assert match[2]["DEFAULT_RECIPE_IMAGE"] == "audiobook-recipe-michael-cosyvoice:local"
     assert "/var/run/docker.sock:/var/run/docker.sock" in match[4]
 
 

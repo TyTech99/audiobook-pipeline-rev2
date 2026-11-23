@@ -22,7 +22,7 @@ logger = logging.getLogger("worker.tts")
 class RecipeRunner:
     """Runs the recipe container. Tests replace this with a stub."""
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         raise NotImplementedError
 
 
@@ -32,46 +32,76 @@ class DockerRecipeRunner(RecipeRunner):
 
         self.client = docker.from_env()
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         import docker.types
+
+        volumes = {
+            input_dir: {"bind": "/input", "mode": "ro"},
+            output_dir: {"bind": "/output", "mode": "rw"},
+        }
+        # Persistent model cache: engine weights download once, not per job
+        # (#88). The worker owns the convention (env HF_HOME=/models/huggingface);
+        # the runner only mounts the host dir at /models.
+        if models_dir:
+            volumes[str(models_dir)] = {"bind": "/models", "mode": "rw"}
 
         kwargs = {
             "image": image,
             "detach": True,
             "environment": env,
-            "volumes": {
-                input_dir: {"bind": "/input", "mode": "ro"},
-                output_dir: {"bind": "/output", "mode": "rw"},
-            },
+            "volumes": volumes,
         }
-        # Use GPU when the host has one; otherwise run CPU-only.
-        if os.path.exists("/dev/nvidia0"):
-            device = os.environ.get("GPU_DEVICE", "").strip()
-            if device and device.lower() != "all":
-                kwargs["device_requests"] = [
-                    docker.types.GPURequest(device_ids=[d.strip() for d in device.split(",") if d.strip()])
-                ]
-            else:
-                kwargs["device_requests"] = [docker.types.GPURequest(count=-1)]
+        # Attach a GPU request when the node declares one. GPU_DEVICE (set
+        # by the supervisor from node.env) is the declaration that matters:
+        # the Docker daemon resolves device_ids on the HOST, so this worker
+        # container does not need to see any device file — and with
+        # GPU_DEVICE=1 it only holds /dev/nvidia1 anyway. The old
+        # os.path.exists('/dev/nvidia0') gate therefore never fired inside
+        # the worker and recipe containers silently ran CPU-only (#101).
+        # Bare-metal workers without GPU_DEVICE keep the presence fallback.
+        device = os.environ.get("GPU_DEVICE", "").strip()
+        if device and device.lower() != "all":
+            kwargs["device_requests"] = [
+                docker.types.DeviceRequest(
+                    device_ids=[d.strip() for d in device.split(",") if d.strip()],
+                    capabilities=[["gpu"]],
+                )
+            ]
+        elif device.lower() == "all" or (not device and os.path.exists("/dev/nvidia0")):
+            kwargs["device_requests"] = [docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])]
+        # GPU or fail (#103): a TTS recipe container without a GPU device
+        # request is a configuration error, and a failed GPU launch is
+        # never retried on CPU — the job fails loudly instead.
+        if "device_requests" not in kwargs:
+            raise RuntimeError(
+                "no GPU device request for the recipe container "
+                "(GPU_DEVICE unset and no host NVIDIA device) — "
+                "TTS is GPU-or-fail (#103)"
+            )
         try:
             container = self.client.containers.run(**kwargs)
         except Exception as exc:
-            if "nvidia" in str(exc).lower() or "gpu" in str(exc).lower():
-                # Retry without GPU if the request failed.
-                container = self.client.containers.run(
-                    image,
-                    detach=True,
-                    environment=env,
-                    volumes={
-                        input_dir: {"bind": "/input", "mode": "ro"},
-                        output_dir: {"bind": "/output", "mode": "rw"},
-                    },
-                )
-            else:
-                raise
+            raise RuntimeError(f"recipe container GPU launch failed: {exc}") from exc
         try:
             result = container.wait(timeout=7200)
-            return int(result.get("StatusCode", 1))
+            code = int(result.get("StatusCode", 1))
+            if code != 0:
+                # Preserve the recipe's dying words (#105): the container's
+                # last log lines are the only record of why it exited, and
+                # the remove() below destroys them. Surface them in the
+                # error so the job row carries the evidence.
+                try:
+                    tail = container.logs(tail=80)
+                    if isinstance(tail, bytes):
+                        tail = tail.decode("utf-8", errors="replace")
+                    tail = tail.strip()
+                except Exception:
+                    tail = ""
+                msg = f"Recipe container exited {code}"
+                if tail:
+                    msg += f"; last log lines:\n{tail}"
+                raise RuntimeError(msg)
+            return code
         finally:
             container.remove(force=True)
 
@@ -193,16 +223,23 @@ class TTSWorker:
 
     def _process_job_inner(self, job: dict, job_id: str) -> dict:
         recipe = job.get("voice_recipe", {})
-        image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael:local"
+        image = recipe.get("image") or self.settings.get("default_recipe_image") or os.environ.get("DEFAULT_RECIPE_IMAGE") or "audiobook-recipe-michael-cosyvoice:local"
 
         import pathlib
-        import tempfile
+        import shutil
 
-        with tempfile.TemporaryDirectory() as tmp:
-            input_dir = pathlib.Path(tmp) / "input"
-            output_dir = pathlib.Path(tmp) / "output"
-            input_dir.mkdir()
-            output_dir.mkdir()
+        # Bind mounts are resolved by the Docker daemon on the HOST. A
+        # container-local tempfile.TemporaryDirectory() does not exist there,
+        # so the recipe container would receive an empty /input (#92). Stage
+        # job data under the storage root, which is mounted into this worker
+        # at the same absolute path the daemon binds from.
+        storage_root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+        job_root = pathlib.Path(storage_root) / "tmp" / job_id
+        input_dir = job_root / "input"
+        output_dir = job_root / "output"
+        input_dir.mkdir(parents=True, exist_ok=True)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
 
             package_url = job.get("package_url") or job.get("input_url") or ""
             if not package_url:
@@ -216,13 +253,37 @@ class TTSWorker:
             }
             env.update(llm_env(llm_settings_from_mapping(self.settings)))
 
-            code = self.runner.run(image, str(input_dir), str(output_dir), env)
+            # Persistent model cache: mount <storage_root>/models into the
+            # recipe container at /models and point HF_HOME there, so engine
+            # weights download once instead of per job (#88). An unwritable
+            # storage root degrades to a container-local HF cache (per-job
+            # download) instead of failing the job.
+            models_dir: pathlib.Path | None = pathlib.Path(storage_root) / "models"
+            try:
+                models_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "Model cache dir %s unavailable (%s); recipe will use a container-local cache",
+                    models_dir, exc,
+                )
+                models_dir = None
+            if models_dir:
+                env["HF_HOME"] = "/models/huggingface"
+
+            code = self.runner.run(
+                image, str(input_dir), str(output_dir), env,
+                models_dir=str(models_dir) if models_dir else None,
+            )
             if code != 0:
                 raise RuntimeError(f"Recipe container exited {code}")
 
-            root = str(self.settings.get("storage_root") or "/var/lib/audiobook").rstrip("/")
+            root = storage_root
             output_prefix = self.settings.get("output_prefix") or f"file://{root}/audio/{job_id}/"
             output_url = upload_dir(output_dir, output_prefix)
+        finally:
+            # Job staging cleanup; a crash leaves inert data under
+            # <storage_root>/tmp/, never a broken bind path.
+            shutil.rmtree(job_root, ignore_errors=True)
 
         self.http.post(
             f"{self.coordinator_url}/jobs/{job_id}/complete",

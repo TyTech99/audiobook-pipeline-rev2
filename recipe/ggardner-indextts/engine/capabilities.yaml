@@ -1,0 +1,92 @@
+# IndexTTS-2.5 engine capabilities
+# Used by the LLM annotation prompt to know what markup is supported.
+#
+# Evidence: HF model card IndexTeam/IndexTTS-2.5 (sha c39ce5ba...,
+# fetched 2026-11-22); indextts/infer_v2_5.py @ d9e41aac (the infer
+# signature and QwenEmotion loader read from that source); IndexTTS 2.5
+# Technical Report (speaker/emotion disentanglement, emotion-weight
+# tables); vLLM-omni recipe (channel precedence, value ranges).
+
+engine: "indextts2.5"
+repo: "github.com/index-tts/index-tts"
+code_revision: "d9e41aac89fd00b3d71497fddb287b7f24613712"
+inference_class: "indextts.infer_v2_5.IndexTTS2"
+output_rate: 22050
+
+# Zero-shot cloning from a SINGLE reference clip — no transcript needed
+# (unlike CosyVoice's zero-shot). The reference carries timbre AND its
+# natural delivery; the emotion channels below steer expression on top.
+voice_cloning:
+  method: "zero-shot single reference clip"
+  transcript_required: false
+  reference: "voices/ggardner.wav (9.0s, expressive human reading)"
+
+# Emotion is DISENTANGLED from timbre (report §4): the timbre prompt and
+# the emotion prompt are independent. One source at a time; official
+# precedence: use_emo_text > emo_vector > emo_audio > the speaker
+# reference's own emotion.
+emotion:
+  disentangled_from_timbre: true
+  channels:
+    - emo_text: >
+        short natural-language emotion description; requires the bundled
+        QwenEmotion 0.6B (qwen0.6bemo4-merge/ ships INSIDE the weights
+        snapshot; construct with use_qwen_emo=True). This recipe's
+        per-segment annotation directions flow here verbatim.
+    - emo_vector: >
+        8 floats ordered [happy, angry, sad, afraid, disgusted,
+        melancholic, surprised, calm], each in [0, 1.2]
+    - emo_audio: >
+        separate emotion-reference recording — timbre from the speaker
+        reference, expression from this clip (different speakers and
+        languages allowed)
+  emo_alpha: >
+    conditioning strength in [0, 1] — the graded intensity knob
+    (report's emotion-weight tables demonstrate 0.5 / 0.8 / 1.0)
+  use_random: >
+    never — reduces voice cloning fidelity, and reproducible takes are
+    the recipe's contract
+
+# IndexTTS-2.5 has NO inline narrative tags. Anything bracketed in the
+# text would be read aloud. The annotation contract below therefore
+# declares an EMPTY inline vocabulary, and the generated prompt forbids
+# bracketed markers outright.
+inline_markup: none
+
+# Pronunciation control IS an inline primitive (<word|reading> Pinyin /
+# CMU / Kana), but it belongs to the pipeline's pronunciation
+# performance layer, not the emotion annotator — deliberately NOT part
+# of the annotation vocabulary below.
+pronunciation_inpainting: "<word|reading> inline (Pinyin / CMU phonemes / Japanese Kana) — carrier for the pronunciation-performance layer"
+
+# Speed semantics are INVERTED vs CosyVoice: duration_factor > 1.0
+# SLOWS DOWN, < 1.0 speeds up; valid range 0.5-2.0.
+speed:
+  parameter: "duration_factor"
+  note: "inverted vs cosyvoice speed; 1.0 keeps the reference clip's own pace"
+
+limitations:
+  - "Long text is split into internal segments (max_text_tokens_per_segment=120) and joined with interval_silence=200ms — prosody is not modelled across internal segment boundaries (model card limitation)"
+  - "use_emo_text without use_qwen_emo=True raises at inference time"
+  - "use_random reduces cloning fidelity"
+
+# ---------------------------------------------------------------------------
+# The annotation contract the SYSTEM reads (#112): recipe/common/annotation.py
+# loads this block and builds the LLM annotation prompt from it. The
+# vocabulary below is EXACTLY what IndexTTS-2.5 consumes — no inline tags
+# (the engine would read them aloud), one direction channel that flows
+# verbatim into emo_text where the engine's own QwenEmotion translates
+# it to the 8-dim vector.
+annotation_contract:
+  inline_tags: []            # NO inline tags exist on this engine — brackets would be spoken
+  instruct_channel:
+    format: "{direction}"
+    controls: ["happy", "angry", "sad", "afraid", "disgusted", "melancholic", "surprised", "calm"]
+    max_direction_words: 8
+    note: >
+      The direction is a SHORT emotion phrase over the engine's own
+      eight-emotion vocabulary (optionally with an intensity word);
+      it is passed to IndexTTS emo_text verbatim.
+  punctuation_rules: []       # pacing comes from the engine's own text handling — nothing to adjust
+  retries: 2
+  direction_granularity: segment  # guide: per-scene explicit emo_text for key moments; natural narrator varies per passage

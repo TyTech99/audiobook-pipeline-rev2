@@ -77,7 +77,7 @@ Voice recipes live in a **separate git repo** from the pipeline code. This enabl
 - Local LLMs: seat count declared in worker registration
 - The coordinator schedules chapter annotation based on available slots
 
-**Tech stack:** Python, PyTorch, TTS engine (Chatterbox/Higgs V3), LLM (for annotation), FFmpeg (mastering/packaging), Redis client
+**Tech stack:** Python, PyTorch, TTS engine (CosyVoice 3/Higgs V3), LLM (for annotation), FFmpeg (mastering/packaging), Redis client
 
 **Input:** Book package + voice recipe + performance style
 **Output:** Audiobook package (M4B + MP3 chapters + credits + sample + metadata + QC report)

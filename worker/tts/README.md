@@ -8,7 +8,7 @@ The TTS worker claims jobs from the Redis `convert` queue, downloads the book pa
 
 ## Implementation status
 
-Implemented (local-file mode, Chatterbox michael recipe). The worker loop claims convert jobs and runs the recipe container. The worker Dockerfile is at `deploy/worker-tts.Dockerfile` and is built at node install. The recipe Dockerfile is at `deploy/recipe-michael.Dockerfile`.
+Implemented (local-file mode, CosyVoice 3 michael recipe). The worker loop claims convert jobs and runs the recipe container. The worker Dockerfile is at `deploy/worker-tts.Dockerfile` and is built at node install. The recipe Dockerfile is at `deploy/recipe-michael-cosyvoice.Dockerfile`. The recipe container gets `<storage_root>/models` mounted at `/models` with `HF_HOME=/models/huggingface`, so engine weights download once instead of per job. TTS is GPU-or-fail (#103): the worker refuses to launch a recipe container without a GPU device request and never retries a GPU-launch failure on CPU.
 
 ## How it runs
 
@@ -23,7 +23,7 @@ The worker reads `config/worker-tts.yaml` (path overridable via `TTS_WORKER_CONF
 - `redis.*`: Redis connection for the job queue
 - `coordinator.url` and `coordinator.api_key`: for registration, heartbeats, and completion reports
 - `storage.root`: local storage root (default `/var/lib/audiobook`)
-- `default_recipe_image`: fallback recipe image (default `audiobook-recipe-michael:local`)
+- `default_recipe_image`: fallback recipe image (default `audiobook-recipe-michael-cosyvoice:local`)
 - `llm.*`: OpenAI-compatible LLM settings forwarded into the recipe container
 
 The TTS container mounts `/var/run/docker.sock` so it can launch recipe containers.
@@ -63,4 +63,4 @@ worker/tts/
 
 - [Voice Recipe](../../docs/data-models/voice-recipe.md)
 - [Audiobook Package](../../docs/data-models/audiobook-package.md)
-- [Michael Chatterbox Recipe](../../recipe/michael-chatterbox/README.md)
+- [Michael CosyVoice Recipe](../../recipe/michael-cosyvoice/README.md)

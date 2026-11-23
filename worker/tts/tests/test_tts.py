@@ -20,7 +20,7 @@ class StubRunner(RecipeRunner):
         self.code = code
         self.calls = []
 
-    def run(self, image: str, input_dir: str, output_dir: str, env: dict) -> int:
+    def run(self, image: str, input_dir: str, output_dir: str, env: dict, models_dir: str | None = None) -> int:
         self.calls.append({"image": image, "input": input_dir, "output": output_dir, "env": env})
         if self.code != 0:
             return self.code
@@ -126,6 +126,9 @@ def test_tts_worker_process_job(tmp_path):
         def lrem(self, name, count, value):
             return 0
 
+        def delete(self, name):
+            return 1
+
     class FakeHttp:
         def __init__(self):
             self.calls = []
@@ -147,6 +150,7 @@ def test_tts_worker_process_job(tmp_path):
         "redis_host": "localhost",
         "redis_port": 6379,
         "output_prefix": str(output_prefix) + "/",
+        "storage_root": str(tmp_path),
         "llm": {
             "base_url": "http://llm:8080/v1",
             "api_key": "llm-key",
@@ -209,6 +213,9 @@ def test_tts_worker_fails_on_nonzero_exit(tmp_path):
         def lrem(self, name, count, value):
             return 0
 
+        def delete(self, name):
+            return 1
+
     class FakeHttp:
         def __init__(self):
             self.calls = []
@@ -229,6 +236,7 @@ def test_tts_worker_fails_on_nonzero_exit(tmp_path):
         "redis_host": "localhost",
         "redis_port": 6379,
         "output_prefix": str(tmp_path / "out") + "/",
+        "storage_root": str(tmp_path),
     }
     worker = TTSWorker(settings, runner=runner, http=http, redis_client=FakeRedis())
 

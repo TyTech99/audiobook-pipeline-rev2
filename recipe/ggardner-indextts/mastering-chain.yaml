@@ -1,4 +1,4 @@
-# Mastering chain for Michael Chatterbox recipe
+# Mastering chain for Michael CosyVoice recipe
 # Applied via ffmpeg after TTS generation, before packaging.
 #
 # Target: ACX-compliant loudness with safety margin.

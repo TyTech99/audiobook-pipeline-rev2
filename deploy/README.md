@@ -243,7 +243,7 @@ Run `deploy/accept-dev.sh` on a dev stand. It checks health, auth, and the node 
 - `supervisor.Dockerfile` builds the supervisor image. The CLI copies it to the node prefix and the systemd unit builds it on first start.
 - `worker-prep.Dockerfile` builds the prep worker image (`audiobook-worker-prep:local`). The CLI copies it to the node prefix and `build-images.sh` builds it before the supervisor starts.
 - `worker-tts.Dockerfile` builds the TTS worker image (`audiobook-worker-tts:local`). The TTS container mounts `/var/run/docker.sock` at runtime so it can launch recipe containers.
-- `recipe-michael.Dockerfile` builds the Chatterbox michael voice recipe image (`audiobook-recipe-michael:local`).
+- `recipe-michael-cosyvoice.Dockerfile` builds the CosyVoice 3 michael voice recipe image (`audiobook-recipe-michael-cosyvoice:local`).
 - `probe.Dockerfile` builds the probe image. The supervisor uses it for throwaway container checks.
 - `build-images.sh` builds all local worker, recipe, and probe images. The node systemd unit calls it in `ExecStartPre` before starting the supervisor.
 - `docker-compose.dev.yml` runs Redis, Postgres, and the coordinator. The CLI copies it to the coordinator prefix and rewrites the Redis bind address.
@@ -259,7 +259,7 @@ The supervisor reads image tags from `config/supervisor.yaml` under `docker.imag
 | --- | --- | --- |
 | `PREP_IMAGE` | `audiobook-worker-prep:local` | Prep worker containers |
 | `TTS_IMAGE` | `audiobook-worker-tts:local` | TTS worker containers |
-| `RECIPE_IMAGE` | `audiobook-recipe-michael:local` | Injected as `DEFAULT_RECIPE_IMAGE` into TTS workers |
+| `RECIPE_IMAGE` | `audiobook-recipe-michael-cosyvoice:local` | Injected as `DEFAULT_RECIPE_IMAGE` into TTS workers |
 | `PROBE_IMAGE` | `audiobook-probe:dev` | Probe containers |
 
 Set these in `/etc/audiobook/node.env` to point at a different registry or tag.
