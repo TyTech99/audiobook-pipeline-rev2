@@ -59,7 +59,7 @@ styles:
 
 tts:
   sample_rate: 22050     # IndexTTS-2.5 native output
-  voice: "voices/ggardner.wav"   # zero-shot timbre + natural delivery reference
+  voice: "voices/hamilton.wav"   # audition: Marlow/Hamilton reference (brisk energy, massive intelligence)
   seed: 1234             # Fixed seed, re-applied per call (reproducible takes)
   chunk_size: 300        # Characters per TTS call
   overlap_ms: 200        # Seam blend between chunks (docs: voice-recipe.md tts.overlap_ms)
